@@ -10,10 +10,13 @@
 
 #![allow(non_snake_case)]
 
+mod options;
+
 use std::ptr::null_mut;
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use options::CmdLineOptions;
 use serde::Serialize;
 use widestring::{U16CStr, U16CString};
 use windows::core::{PCWSTR, PWSTR};
@@ -27,45 +30,6 @@ use windows::Win32::NetworkManagement::NetManagement::{
     UF_SMARTCARD_REQUIRED, UF_TEMP_DUPLICATE_ACCOUNT, UF_TRUSTED_FOR_DELEGATION,
     UF_USE_DES_KEY_ONLY, UF_WORKSTATION_TRUST_ACCOUNT, USER_INFO_10, USER_INFO_2,
 };
-
-/// Simple CLI for querying Windows user information.
-#[derive(Parser, Debug)]
-#[command(name = "netuser")]
-#[command(about = "Query Windows user information using native APIs", long_about = None)]
-struct Cli {
-    /// Username to look up
-    username: String,
-
-    /// Show brief details. Mutually exclusive with --extended-details.
-    #[arg(short = 'd', long = "details", conflicts_with = "extended_details")]
-    details: bool,
-
-    /// Show extended details. Mutually exclusive with --details.
-    #[arg(short = 'e', long = "extended-details", conflicts_with = "details")]
-    extended_details: bool,
-
-    /// Show groups the user is a member of
-    #[arg(short = 'g', long = "groups")]
-    groups: bool,
-
-    /// Explicit server/DC to query (e.g. "\\DCNAME" or servername). Accepted formats:
-    /// - plain name: `DC01`
-    /// - with leading backslashes: `\\DC01` (both `\\DC01` and `DC01` will be normalized)
-    /// If omitted the tool will attempt to discover a domain controller automatically and
-    /// fall back to local queries if none is found. When used the value is normalized to a
-    /// form accepted by the Net* APIs (leading `\\`).
-    #[arg(short = 's', long = "server", value_name = "SERVER")]
-    server: Option<String>,
-
-    /// Skip automatic domain controller discovery and use the local machine unless --server is provided.
-    /// This is equivalent to explicitly passing an empty server (i.e. do not attempt to call NetGetDCName).
-    #[arg(long = "no-discover")]
-    no_discover: bool,
-
-    /// Output requested details as JSON
-    #[arg(short = 'j', long = "json")]
-    json: bool,
-}
 
 #[derive(Serialize)]
 struct UserJson {
@@ -590,7 +554,7 @@ fn decide_req_level(details: bool, extended_details: bool, json: bool) -> ReqLev
 }
 
 fn main() -> Result<()> {
-    let cli = Cli::parse();
+    let cli = CmdLineOptions::parse();
 
     // Determine server option:
     // - If --no-discover is set: use --server (if provided and non-empty) after normalization; otherwise use local (None).
@@ -938,11 +902,13 @@ mod tests {
     #[test]
     fn cli_short_flags_parse() {
         // Verify short flag parsing for brief and extended details.
-        let c: super::Cli = clap::Parser::try_parse_from(&["netuser", "-d", "alice"]).unwrap();
+        let c: super::CmdLineOptions =
+            clap::Parser::try_parse_from(&["netuser", "-d", "alice"]).unwrap();
         assert!(c.details);
         assert!(!c.extended_details);
 
-        let c2: super::Cli = clap::Parser::try_parse_from(&["netuser", "-e", "alice"]).unwrap();
+        let c2: super::CmdLineOptions =
+            clap::Parser::try_parse_from(&["netuser", "-e", "alice"]).unwrap();
         assert!(c2.extended_details);
         assert!(!c2.details);
     }

@@ -2,13 +2,14 @@
 name = "netuser"
 version = "0.1.0"
 edition = "2021"
-description = "A small CLI tool to query Windows user information using native Windows APIs."
-license = "MIT"
+authors = ["Alec Brown<alec@noser.net>"]
+description = "A small CLI tool to query Windows user information."
+license = "Apache-2.0"
 
 [dependencies]
-clap = { version = "4.2", features = ["derive"] }
+clap = { version = "4.5", features = ["derive"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 anyhow = "1.0"
-widestring = "0.5"
-windows = { version = "0.48.0", features = ["Win32_NetworkManagement_NetManagement", "Win32_Foundation"] }
+widestring = "1.2.1"
+windows = { version = "0.62.0", features = ["Win32_NetworkManagement_NetManagement", "Win32_Foundation"] }
