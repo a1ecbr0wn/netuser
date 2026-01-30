@@ -1,0 +1,96 @@
+---
+name: Release Binaries on Tag
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  # Check the rust formatting
+  format:
+    name: Rust Format Check
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      # - name: Rust Toolchain setup
+      #   uses: dtolnay/rust-toolchain@stable
+      #   with:
+      #     components: rustfmt
+
+      - name: Format Check
+        uses: mbrobbel/rustfmt-check@master
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  # Build the Windows release artifacts
+  release-tag-build-windows:
+    name: Build tag as a release - Windows
+    runs-on: windows-latest
+    needs: format
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      # - name: Toolchain setup
+      #   uses: dtolnay/rust-toolchain@master
+      #   with:
+      #     components: cargo
+
+      - name: Test
+        run: cargo test --target=${{ matrix.TARGET }}
+
+      - name: Build
+        run: cargo build --release --target=${{ matrix.TARGET }}
+
+      - name: Package Release
+        run: zip netuser-${{ matrix.TARGET }}.zip target/${{ matrix.TARGET }}/release/*
+
+      - name: Generate MD5 checksum
+        run: certutil -hashfile netuser-${{ matrix.TARGET }}.zip MD5 > netuser-${{ matrix.TARGET }}.md5
+
+      - name: Upload the artifact with the workflow run
+        uses: actions/upload-artifact@v4
+        with:
+          name: netuser-${{ matrix.TARGET }}-${{ github.ref_name }}
+          path: netuser-${{ matrix.TARGET }}.*
+          retention-days: 1
+
+  # Package the artifacts as a release package
+  release-tag-package:
+    name: Package tag as a release
+    runs-on: windows-latest
+    needs: [release-tag-build-windows]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Download all release artifacts from the workflow
+        uses: actions/download-artifact@v4
+
+      - name: Generate a changelog
+        uses: orhun/git-cliff-action@v4
+        id: git-cliff
+        with:
+          config: cliff-release.toml
+        env:
+          OUTPUT: CHANGELOG.md
+          GITHUB_REPO: ${{ github.repository }}
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: CHANGELOG.md
+          tag_name: "${{ github.ref_name }}"
+          name: "Release ${{ github.ref_name }}"
+          token: "${{ secrets.GITHUB_TOKEN }}"
+          files: |
+            LICENSE
+            **/netuser-*.*
