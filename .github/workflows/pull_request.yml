@@ -105,4 +105,4 @@ jobs:
         run: cargo build
 
       - name: Test
-        run: cross test
+        run: cargo test
