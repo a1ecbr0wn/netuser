@@ -28,9 +28,9 @@ pub struct CmdLineOptions {
     /// Explicit server/DC to query (e.g. "\\DCNAME" or servername). Accepted formats:
     /// - plain name: `DC01`
     /// - with leading backslashes: `\\DC01` (both `\\DC01` and `DC01` will be normalized)
-    /// If omitted the tool will attempt to discover a domain controller automatically and
-    /// fall back to local queries if none is found. When used the value is normalized to a
-    /// form accepted by the Net* APIs (leading `\\`).
+    ///   If omitted the tool will attempt to discover a domain controller automatically and
+    ///   fall back to local queries if none is found. When used the value is normalized to a
+    ///   form accepted by the Net* APIs (leading `\\`).
     #[arg(short = 's', long = "server", value_name = "SERVER")]
     pub server: Option<String>,
 

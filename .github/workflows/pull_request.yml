@@ -1,0 +1,108 @@
+---
+name: Pull Request Build
+
+on:
+  pull_request:
+    branches:
+      - "**"
+    paths:
+      - "**/*.rs"
+      - "src/*"
+      - "Cargo.*"
+      - ".github/workflows/pull_request.yml"
+  schedule:
+    - cron: "0 0 * * 1"
+  workflow_dispatch:
+
+jobs:
+  changelog:
+    name: Generate CHANGELOG.md
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Generate a changelog
+        uses: orhun/git-cliff-action@v4
+        id: git-cliff
+        with:
+          config: cliff.toml
+          args: --unreleased --bump
+        env:
+          OUTPUT: CHANGELOG.md
+          GITHUB_REPO: ${{ github.repository }}
+
+      - name: Upload the CHANGELOG.md
+        uses: actions/upload-artifact@v6
+        with:
+          name: CHANGELOG.md
+          path: CHANGELOG.md
+          retention-days: 7
+
+  format:
+    name: Rust Format Check
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      # - name: Rust Toolchain setup
+      #   uses: dtolnay/rust-toolchain@stable
+      #   with:
+      #     components: rustfmt
+
+      - name: Format Check
+        uses: mbrobbel/rustfmt-check@master
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  clippy:
+    name: Rust Clippy Check
+    runs-on: windows-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      # - name: Rust Toolchain setup
+      #   uses: dtolnay/rust-toolchain@stable
+      #   with:
+      #     components: cargo, clippy
+
+      - name: clippy-sarif setup
+        run: cargo install clippy-sarif sarif-fmt
+
+      - name: Run rust-clippy
+        run: cargo clippy --all-features --message-format=json | clippy-sarif | tee rust-clippy-results.sarif | sarif-fmt
+        continue-on-error: true
+
+      - name: Upload analysis results to GitHub
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: rust-clippy-results.sarif
+          wait-for-processing: true
+
+  build-windows:
+    name: PR Build - Windows
+    runs-on: windows-latest
+    needs: [format, clippy]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      # - name: Rust Toolchain setup
+      #   uses: dtolnay/rust-toolchain@master
+      #   with:
+      #     components: cargo
+
+      - name: Build
+        run: cargo build
+
+      - name: Test
+        run: cargo test

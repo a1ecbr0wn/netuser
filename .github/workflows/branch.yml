@@ -1,0 +1,92 @@
+---
+name: Branch Build
+
+on:
+  push:
+    branches:
+      - "**"
+    paths:
+      - "**/*.rs"
+      - "src/*"
+      - "Cargo.*"
+      - ".github/workflows/branch.yml"
+  workflow_dispatch:
+
+jobs:
+  changelog:
+    name: Generate CHANGELOG.md
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Generate a changelog
+        uses: orhun/git-cliff-action@v4
+        id: git-cliff
+        with:
+          config: cliff.toml
+          args: --unreleased --bump
+        env:
+          OUTPUT: CHANGELOG.md
+          GITHUB_REPO: ${{ github.repository }}
+
+      - name: Upload the CHANGELOG.md
+        uses: actions/upload-artifact@v6
+        with:
+          name: CHANGELOG.md
+          path: CHANGELOG.md
+          retention-days: 7
+
+  format:
+    name: Rust Format Check
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      # - name: Rust Toolchain setup
+      #   uses: dtolnay/rust-toolchain@stable
+      #   with:
+      #     components: rustfmt
+
+      - name: Format Check
+        uses: mbrobbel/rustfmt-check@master
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  clippy:
+    name: Rust Clippy Check
+    runs-on: windows-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      # - name: Rust Toolchain setup
+      #   uses: dtolnay/rust-toolchain@stable
+      #   with:
+      #     components: cargo, clippy
+
+      - name: Run rust-clippy
+        run: cargo clippy --all-features
+        continue-on-error: true
+
+  build-windows:
+    name: CI Build - Windows
+    runs-on: windows-latest
+    needs: [format, clippy]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Build
+        run: cargo build
+
+      - name: Test
+        run: cargo test
