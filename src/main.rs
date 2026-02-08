@@ -332,7 +332,7 @@ fn print_extended_detail(user_info: &USER_INFO_2) {
         pwstr_to_string(user_info.usri2_usr_comment).unwrap_or_default()
     );
     // Decode and print user flags as human-readable labels.
-    let flags_vec = decode_user_flags(user_info.usri2_flags.0 as u32);
+    let flags_vec = decode_user_flags(user_info.usri2_flags.0);
     if flags_vec.is_empty() {
         println!("User flags: (none)");
     } else {
@@ -386,7 +386,7 @@ fn build_user_json_extended_detail(
             None
         },
         user_flags: if include_detail {
-            Some(decode_user_flags(user_info.usri2_flags.0 as u32))
+            Some(decode_user_flags(user_info.usri2_flags.0))
         } else {
             None
         },
@@ -457,7 +457,7 @@ fn build_user_json_detail(
 fn priv_to_label(
     priv_val: windows::Win32::NetworkManagement::NetManagement::USER_PRIV,
 ) -> &'static str {
-    match priv_val.0 as u32 {
+    match priv_val.0 {
         0 => "Guest",
         1 => "User",
         2 => "Administrator",
@@ -473,25 +473,25 @@ fn seconds_to_days(seconds: u32) -> u64 {
 fn decode_user_flags(flags: u32) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
 
-    if (flags & (UF_SCRIPT.0 as u32)) != 0 {
+    if (flags & UF_SCRIPT.0) != 0 {
         out.push("Script".to_string());
     }
-    if (flags & (UF_ACCOUNTDISABLE.0 as u32)) != 0 {
+    if (flags & UF_ACCOUNTDISABLE.0) != 0 {
         out.push("Account disabled".to_string());
     }
-    if (flags & (UF_HOMEDIR_REQUIRED.0 as u32)) != 0 {
+    if (flags & UF_HOMEDIR_REQUIRED.0) != 0 {
         out.push("Home directory required".to_string());
     }
-    if (flags & (UF_LOCKOUT.0 as u32)) != 0 {
+    if (flags & UF_LOCKOUT.0) != 0 {
         out.push("Locked out".to_string());
     }
-    if (flags & (UF_PASSWD_NOTREQD.0 as u32)) != 0 {
+    if (flags & UF_PASSWD_NOTREQD.0) != 0 {
         out.push("Password not required".to_string());
     }
-    if (flags & (UF_PASSWD_CANT_CHANGE.0 as u32)) != 0 {
+    if (flags & UF_PASSWD_CANT_CHANGE.0) != 0 {
         out.push("Cannot change password".to_string());
     }
-    if (flags & (UF_ENCRYPTED_TEXT_PASSWORD_ALLOWED.0 as u32)) != 0 {
+    if (flags & UF_ENCRYPTED_TEXT_PASSWORD_ALLOWED.0) != 0 {
         out.push("Encrypted text password allowed".to_string());
     }
     if (flags & UF_TEMP_DUPLICATE_ACCOUNT) != 0 {
@@ -509,22 +509,22 @@ fn decode_user_flags(flags: u32) -> Vec<String> {
     if (flags & UF_SERVER_TRUST_ACCOUNT) != 0 {
         out.push("Server trust account".to_string());
     }
-    if (flags & (UF_DONT_EXPIRE_PASSWD.0 as u32)) != 0 {
+    if (flags & UF_DONT_EXPIRE_PASSWD.0) != 0 {
         out.push("Password does not expire".to_string());
     }
-    if (flags & (UF_SMARTCARD_REQUIRED.0 as u32)) != 0 {
+    if (flags & UF_SMARTCARD_REQUIRED.0) != 0 {
         out.push("Smartcard required".to_string());
     }
-    if (flags & (UF_TRUSTED_FOR_DELEGATION.0 as u32)) != 0 {
+    if (flags & UF_TRUSTED_FOR_DELEGATION.0) != 0 {
         out.push("Trusted for delegation".to_string());
     }
-    if (flags & (UF_NOT_DELEGATED.0 as u32)) != 0 {
+    if (flags & UF_NOT_DELEGATED.0) != 0 {
         out.push("Not delegated".to_string());
     }
-    if (flags & (UF_USE_DES_KEY_ONLY.0 as u32)) != 0 {
+    if (flags & UF_USE_DES_KEY_ONLY.0) != 0 {
         out.push("Use DES key only".to_string());
     }
-    if (flags & (UF_DONT_REQUIRE_PREAUTH.0 as u32)) != 0 {
+    if (flags & UF_DONT_REQUIRE_PREAUTH.0) != 0 {
         out.push("Does not require preauth".to_string());
     }
     if (flags & UF_PARTIAL_SECRETS_ACCOUNT) != 0 {
@@ -540,13 +540,10 @@ enum ReqLevel {
     Level10,
 }
 
-fn decide_req_level(details: bool, extended_details: bool, json: bool) -> ReqLevel {
+fn decide_req_level(extended_details: bool) -> ReqLevel {
     // Extended details explicitly requested -> level2
     if extended_details {
         ReqLevel::Level2
-    // If brief details or JSON requested, prefer level10 for minimal exposure
-    } else if details || json {
-        ReqLevel::Level10
     // Default to level10 when nothing is explicitly requested (keeps behavior conservative)
     } else {
         ReqLevel::Level10
@@ -579,7 +576,7 @@ fn main() -> Result<()> {
     // - If the user asked for extended details -> level 2 (USER_INFO_2)
     // - Else if the user asked for details -> level 10 (USER_INFO_10)
     // - Else if JSON was requested but no detail flags -> use level 10 for minimal JSON
-    let req_level = decide_req_level(cli.details, cli.extended_details, cli.json);
+    let req_level = decide_req_level(cli.extended_details);
 
     // Fetch data according to requested level, with the same fallback behavior (try DC, then local)
     let mut info2_opt: Option<USER_INFO_2> = None;
@@ -917,25 +914,9 @@ mod tests {
     fn decide_req_level_tests() {
         use super::ReqLevel;
         // default/no flags => level10 (conservative)
-        assert_eq!(
-            super::decide_req_level(false, false, false),
-            ReqLevel::Level10
-        );
-        // explicit brief details => level10
-        assert_eq!(
-            super::decide_req_level(true, false, false),
-            ReqLevel::Level10
-        );
+        assert_eq!(super::decide_req_level(false), ReqLevel::Level10);
         // explicit extended details => level2
-        assert_eq!(
-            super::decide_req_level(false, true, false),
-            ReqLevel::Level2
-        );
-        // JSON requested without detail flags => level10
-        assert_eq!(
-            super::decide_req_level(false, false, true),
-            ReqLevel::Level10
-        );
+        assert_eq!(super::decide_req_level(true), ReqLevel::Level2);
     }
 
     #[test]
