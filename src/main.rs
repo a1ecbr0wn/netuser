@@ -314,18 +314,19 @@ fn main() -> Result<()> {
     let servername = server_opt.as_deref();
 
     // Fetch data according to requested level, with the same fallback behavior (try DC, then local)
-    let mut user_info_opt: Option<UserInfo> = None;
+    let mut user_info_opt: Option<UserInfo>;
 
     if cli.extended_details {
-        match query_user_details(servername, &cli.username) {
+        match query_user_extended_details(servername, &cli.username) {
             Ok(u10) => user_info_opt = Some(u10),
             Err(e) => {
                 if servername.is_some() {
                     eprintln!("warning: failed to query user info using DC ({e}). Falling back to local queries.");
-                    user_info_opt =
-                        Some(query_user_details(None, &cli.username).with_context(|| {
+                    user_info_opt = Some(
+                        query_user_extended_details(None, &cli.username).with_context(|| {
                             "failed to query user info (fallback) - ensure you have privileges"
-                        })?);
+                        })?,
+                    );
                 } else {
                     return Err(e).context("failed to query user info");
                 }
