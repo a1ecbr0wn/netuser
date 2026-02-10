@@ -43,8 +43,6 @@ struct UserInfo {
     home_dir: Option<String>,
     /// user script path
     script_path: Option<String>,
-    /// user profile path
-    profile_path: Option<String>,
     /// user last logon time
     last_logon: Option<u32>,
     /// user last logoff time
@@ -60,7 +58,7 @@ struct UserInfo {
     /// user logon server
     logon_server: Option<String>,
     /// country code
-    country_code: Option<String>,
+    country_code: Option<u32>,
 }
 
 #[derive(Serialize)]
@@ -84,8 +82,6 @@ struct UserJson {
     #[serde(skip_serializing_if = "Option::is_none")]
     script_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    profile_path: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     last_logon: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     last_logoff: Option<u32>,
@@ -100,7 +96,7 @@ struct UserJson {
     #[serde(skip_serializing_if = "Option::is_none")]
     logon_server: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    country_code: Option<String>,
+    country_code: Option<u32>,
 
     // Only populated when --groups is provided
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -150,7 +146,6 @@ fn query_user_extended_details(servername: Option<&str>, username: &str) -> Resu
         privileges: Some(priv_to_label(ui2.usri2_priv).to_string()),
         home_dir: pwstr_to_string(ui2.usri2_home_dir),
         script_path: pwstr_to_string(ui2.usri2_script_path),
-        profile_path: pwstr_to_string(ui2.usri2_profile_path),
         last_logon: Some(seconds_to_days(ui2.usri2_last_logon)),
         last_logoff: Some(seconds_to_days(ui2.usri2_last_logoff)),
         acct_expires: Some(seconds_to_days(ui2.usri2_acct_expires)),
@@ -175,7 +170,6 @@ fn query_user_details(servername: Option<&str>, username: &str) -> Result<UserIn
         privileges: None,
         home_dir: None,
         script_path: None,
-        profile_path: None,
         last_logon: None,
         last_logoff: None,
         acct_expires: None,
@@ -208,8 +202,8 @@ fn print_detail(user_info: &UserInfo) {
     if let Some(usr_comment) = &user_info.usr_comment {
         println!("User comment: {usr_comment}");
     }
-    if let Some(pwd_age) = &user_info.pwd_age {
-        println!("Password age: {pwd_age} days");
+    if let Some(password_age) = &user_info.password_age {
+        println!("Password age: {password_age} days");
     }
     if let Some(flags) = &user_info.flags {
         println!("Flags: {flags}");
@@ -232,8 +226,8 @@ fn print_detail(user_info: &UserInfo) {
     if let Some(last_logoff) = &user_info.last_logoff {
         println!("Last logoff: {last_logoff}");
     }
-    if let Some(account_expires) = &user_info.account_expires {
-        println!("Account expires: {account_expires}");
+    if let Some(acct_expires) = &user_info.acct_expires {
+        println!("Account expires: {acct_expires}");
     }
     if let Some(workstations) = &user_info.workstations {
         println!("Workstations: {workstations}");
@@ -268,7 +262,6 @@ fn build_user_json(
         privileges: user_info.privileges.clone(),
         home_dir: user_info.home_dir.clone(),
         script_path: user_info.script_path.clone(),
-        profile_path: user_info.profile_path.clone(),
         last_logon: user_info.last_logon,
         last_logoff: user_info.last_logoff,
         acct_expires: user_info.acct_expires,
@@ -276,7 +269,7 @@ fn build_user_json(
         max_storage: user_info.max_storage,
         num_logons: user_info.num_logons,
         logon_server: user_info.logon_server.clone(),
-        country_code: user_info.country_code.clone(),
+        country_code: user_info.country_code,
         groups: if include_groups {
             groups.cloned()
         } else {
@@ -326,7 +319,7 @@ fn main() -> Result<()> {
     // Fetch data according to requested level, with the same fallback behavior (try DC, then local)
     let mut user_info_opt: Option<UserInfo> = None;
 
-    let mut user_info_opt = if cli.extended_details {
+    if cli.extended_details {
         match query_user_details(servername, &cli.username) {
             Ok(u10) => user_info_opt = Some(u10),
             Err(e) => {
@@ -358,7 +351,7 @@ fn main() -> Result<()> {
         }
     } else {
         user_info_opt = Some(UserInfo {
-            username: Some(username),
+            username: Some((&cli.username).to_owned()),
             full_name: None,
             comment: None,
             usr_comment: None,
@@ -367,7 +360,6 @@ fn main() -> Result<()> {
             privileges: None,
             home_dir: None,
             script_path: None,
-            profile_path: None,
             last_logon: None,
             last_logoff: None,
             acct_expires: None,
@@ -424,7 +416,6 @@ fn main() -> Result<()> {
                 privileges: None,
                 home_dir: None,
                 script_path: None,
-                profile_path: None,
                 last_logon: None,
                 last_logoff: None,
                 acct_expires: None,
@@ -445,12 +436,12 @@ fn main() -> Result<()> {
     if !cli.details && !cli.extended_details && !cli.groups {
         // No detail flags requested and no groups: show only full name using level10 when available.
         if let Some(user_info) = user_info_opt.as_ref() {
-            if let Some(full_name) = &info.full_name {
+            if let Some(full_name) = &user_info.full_name {
                 println!("{full_name}");
-            } else if let Some(name) = &info.username {
+            } else if let Some(name) = &user_info.username {
                 println!("{name}");
             } else {
-                println!("{username}");
+                println!("{}" & cli.username.to_owned());
             }
         } else {
             // As a very conservative fallback
@@ -651,7 +642,6 @@ mod tests {
             privileges: None,
             home_dir: None,
             script_path: None,
-            profile_path: None,
             last_logon: None,
             last_logoff: None,
             acct_expires: None,
