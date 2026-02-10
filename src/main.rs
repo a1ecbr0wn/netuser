@@ -206,7 +206,7 @@ fn print_detail(user_info: &UserInfo) {
         println!("Password age: {password_age} days");
     }
     if let Some(flags) = &user_info.flags {
-        println!("Flags: {flags}");
+        println!("Flags: {}", flags.join(", "));
     }
     if let Some(privileges) = &user_info.privileges {
         println!("Privilege level: {privileges}");
@@ -216,9 +216,6 @@ fn print_detail(user_info: &UserInfo) {
     }
     if let Some(script_path) = &user_info.script_path {
         println!("Script path: {script_path}");
-    }
-    if let Some(profile_path) = &user_info.profile_path {
-        println!("Profile path: {profile_path}");
     }
     if let Some(last_logon) = &user_info.last_logon {
         println!("Last logon: {last_logon}");
@@ -441,7 +438,7 @@ fn main() -> Result<()> {
             } else if let Some(name) = &user_info.username {
                 println!("{name}");
             } else {
-                println!("{}" & cli.username.to_owned());
+                println!("{}", cli.username.to_owned());
             }
         } else {
             // As a very conservative fallback

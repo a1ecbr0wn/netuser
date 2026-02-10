@@ -49,11 +49,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      # - name: Rust Toolchain setup
-      #   uses: dtolnay/rust-toolchain@stable
-      #   with:
-      #     components: rustfmt
-
       - name: Format Check
         uses: mbrobbel/rustfmt-check@master
         with:
@@ -68,11 +63,6 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
-
-      # - name: Rust Toolchain setup
-      #   uses: dtolnay/rust-toolchain@stable
-      #   with:
-      #     components: cargo, clippy
 
       - name: clippy-sarif setup
         run: cargo install clippy-sarif sarif-fmt
@@ -95,11 +85,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
-
-      # - name: Rust Toolchain setup
-      #   uses: dtolnay/rust-toolchain@master
-      #   with:
-      #     components: cargo
 
       - name: Build
         run: cargo build
