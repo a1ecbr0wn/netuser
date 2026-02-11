@@ -16,11 +16,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      # - name: Rust Toolchain setup
-      #   uses: dtolnay/rust-toolchain@stable
-      #   with:
-      #     components: rustfmt
-
       - name: Format Check
         uses: mbrobbel/rustfmt-check@master
         with:
@@ -35,11 +30,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
-
-      # - name: Toolchain setup
-      #   uses: dtolnay/rust-toolchain@master
-      #   with:
-      #     components: cargo
 
       - name: Test
         run: cargo test --target=${{ matrix.TARGET }}

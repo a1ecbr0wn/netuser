@@ -4,32 +4,62 @@
 //! - CLI via `clap`
 //! - Uses `windows` crate to call `NetGetDCName`, `NetUserGetInfo`, `NetUserGetGroups`
 //! - Default output is the user's full name (or username if missing)
-//! - `-d/--detail` prints all user info fields
+//! - `-d/--detail` prints basic user info fields
+//! - `-e/--extended-details` prints all user info fields
 //! - `-g/--groups` prints group membership
 //! - `-j/--json` outputs requested details in JSON (respects other flags)
 
 #![allow(non_snake_case)]
 
 mod options;
-
-use std::ptr::null_mut;
+mod winapi;
 
 use anyhow::{Context, Result};
 use clap::Parser;
 use options::CmdLineOptions;
 use serde::Serialize;
-use widestring::{U16CStr, U16CString};
-use windows::core::{PCWSTR, PWSTR};
-use windows::Win32::Foundation::ERROR_SUCCESS;
-use windows::Win32::NetworkManagement::NetManagement::{
-    NetApiBufferFree, NetGetDCName, NetUserGetGroups, NetUserGetInfo, GROUP_USERS_INFO_0,
-    UF_ACCOUNTDISABLE, UF_DONT_EXPIRE_PASSWD, UF_DONT_REQUIRE_PREAUTH,
-    UF_ENCRYPTED_TEXT_PASSWORD_ALLOWED, UF_HOMEDIR_REQUIRED, UF_INTERDOMAIN_TRUST_ACCOUNT,
-    UF_LOCKOUT, UF_NORMAL_ACCOUNT, UF_NOT_DELEGATED, UF_PARTIAL_SECRETS_ACCOUNT,
-    UF_PASSWD_CANT_CHANGE, UF_PASSWD_NOTREQD, UF_SCRIPT, UF_SERVER_TRUST_ACCOUNT,
-    UF_SMARTCARD_REQUIRED, UF_TEMP_DUPLICATE_ACCOUNT, UF_TRUSTED_FOR_DELEGATION,
-    UF_USE_DES_KEY_ONLY, UF_WORKSTATION_TRUST_ACCOUNT, USER_INFO_10, USER_INFO_2,
+use winapi::{
+    decode_privileges, decode_user_flags, get_domain_controller_name, get_user_details,
+    get_user_extended_details, get_user_groups, pwstr_to_string,
 };
+
+/// Lightweight representation of user info results.
+struct UserInfo {
+    /// username
+    username: Option<String>,
+    /// full name
+    full_name: Option<String>,
+    /// admin/description comment
+    comment: Option<String>,
+    /// user comment
+    usr_comment: Option<String>,
+    /// user flags
+    flags: Option<Vec<String>>,
+    /// password age
+    password_age: Option<u32>,
+    /// user privileges
+    privileges: Option<String>,
+    /// user home directory
+    home_dir: Option<String>,
+    /// user script path
+    script_path: Option<String>,
+    /// user last logon time
+    last_logon: Option<u32>,
+    /// user last logoff time
+    last_logoff: Option<u32>,
+    /// user account expiration time
+    acct_expires: Option<u32>,
+    /// workstations
+    workstations: Option<String>,
+    /// max storage
+    max_storage: Option<u32>,
+    /// num_logons
+    num_logons: Option<u32>,
+    /// user logon server
+    logon_server: Option<String>,
+    /// country code
+    country_code: Option<u32>,
+}
 
 #[derive(Serialize)]
 struct UserJson {
@@ -37,77 +67,43 @@ struct UserJson {
     username: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     full_name: Option<String>,
-    // Only populated when --detail is provided
     #[serde(skip_serializing_if = "Option::is_none")]
     comment: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     user_comment: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    user_flags: Option<Vec<String>>,
+    flags: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     password_age: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    priv_level: Option<String>,
+    privileges: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     home_dir: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     script_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    profile: Option<String>,
+    last_logon: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_logoff: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    acct_expires: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    workstations: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_storage: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    num_logons: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    logon_server: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    country_code: Option<u32>,
 
     // Only populated when --groups is provided
     #[serde(skip_serializing_if = "Option::is_none")]
     groups: Option<Vec<String>>,
 }
 
-fn pwstr_to_string(p: PWSTR) -> Option<String> {
-    if p.is_null() {
-        return None;
-    }
-    // PWSTR is *mut u16 internally; convert using U16CStr from widestring
-    let raw = p.0;
-    if raw.is_null() {
-        return None;
-    }
-    // Safety: Net API returns a null-terminated UTF-16 string
-    unsafe { U16CStr::from_ptr_str(raw).to_string().ok() }
-}
-
-unsafe fn local_free_api_buffer(ptr: *mut core::ffi::c_void) {
-    if !ptr.is_null() {
-        // Ignore errors from NetApiBufferFree - nothing we can do about them here
-        let _ = NetApiBufferFree(Some(ptr));
-    }
-}
-
-/// Try to find a domain controller name for the local context.
-/// On success, returns Some(String) containing the DC server name (eg: "\\\\DCNAME"),
-/// which can be passed as the `servername` parameter to other Net* calls.
-/// If it fails, returns None and callers should fall back to using a null servername.
-fn get_domain_controller_name() -> Option<String> {
-    unsafe {
-        // The generated signature for NetGetDCName expects a pointer to a raw buffer pointer
-        // (effectively an LPBYTE* / *mut *mut u8). Prepare a raw pointer and pass its address.
-        let mut dc_ptr_raw: *mut u8 = std::ptr::null_mut();
-        // Pass servername = NULL (local machine), domainname = NULL (default)
-        // NetGetDCName expects a pointer to a raw buffer pointer, so pass &mut dc_ptr_raw.
-        let status = NetGetDCName(
-            PCWSTR::null(),
-            PCWSTR::null(),
-            &mut dc_ptr_raw as *mut *mut u8,
-        );
-        if status != ERROR_SUCCESS.0 {
-            // couldn't get DC name
-            return None;
-        }
-        // Wrap the raw pointer as PWSTR for our helper conversion
-        let dc_pw = PWSTR(dc_ptr_raw as *mut _);
-        let dc_name = pwstr_to_string(dc_pw);
-        // Free allocated buffer
-        local_free_api_buffer(dc_ptr_raw as *mut _);
-        dc_name
-    }
-}
+// Functions to interpret the data received about users
 
 /// Normalizes user-supplied server names for use with Windows Net* APIs.
 ///
@@ -130,424 +126,158 @@ fn normalize_server_input(s: Option<&str>) -> Option<String> {
             Some(format!("\\\\{}", t.trim_start_matches('\\')))
         } else {
             // Add leading double-backslash
-            Some(format!("\\\\{}", t))
+            Some(format!("\\\\{t}"))
         }
     })
 }
 
+// Functions querying the Windows API for user information.
+
 /// Query basic USER_INFO_2 for `username` on `servername` (which may be None for local).
-fn query_user_info(servername: Option<&str>, username: &str) -> Result<USER_INFO_2> {
-    unsafe {
-        let mut buf: *mut core::ffi::c_void = null_mut();
-        // Prepare PCWSTR for server and username
-        let server_pw = servername.map(|s| U16CString::from_str(s).unwrap());
-        let server_p: PCWSTR = server_pw
-            .as_ref()
-            .map(|u| PCWSTR(u.as_ptr()))
-            .unwrap_or(PCWSTR::null());
+fn query_user_extended_details(servername: Option<&str>, username: &str) -> Result<UserInfo> {
+    let ui2 = get_user_extended_details(servername, username)?;
+    Ok(UserInfo {
+        username: pwstr_to_string(ui2.usri2_name),
+        full_name: pwstr_to_string(ui2.usri2_full_name),
+        comment: pwstr_to_string(ui2.usri2_comment),
+        usr_comment: pwstr_to_string(ui2.usri2_usr_comment),
+        password_age: Some(seconds_to_days(ui2.usri2_password_age)),
+        flags: decode_user_flags(ui2.usri2_flags.0),
+        privileges: Some(decode_privileges(ui2.usri2_priv).to_string()),
+        home_dir: pwstr_to_string(ui2.usri2_home_dir),
+        script_path: pwstr_to_string(ui2.usri2_script_path),
+        last_logon: Some(seconds_to_days(ui2.usri2_last_logon)),
+        last_logoff: Some(seconds_to_days(ui2.usri2_last_logoff)),
+        acct_expires: Some(seconds_to_days(ui2.usri2_acct_expires)),
+        workstations: pwstr_to_string(ui2.usri2_workstations),
+        max_storage: Some(ui2.usri2_max_storage),
+        num_logons: Some(ui2.usri2_num_logons),
+        logon_server: pwstr_to_string(ui2.usri2_logon_server),
+        country_code: Some(ui2.usri2_country_code),
+    })
+}
 
-        let name_u = U16CString::from_str(username)
-            .with_context(|| "failed to encode username as UTF-16")?;
-        let name_p: PCWSTR = PCWSTR(name_u.as_ptr());
-
-        let level: u32 = 2; // USER_INFO_2
-        let status = NetUserGetInfo(
-            server_p,
-            name_p,
-            level,
-            &mut buf as *mut *mut core::ffi::c_void as _,
-        );
-        if status != ERROR_SUCCESS.0 {
-            anyhow::bail!("NetUserGetInfo failed with code {}", status);
-        }
-        if buf.is_null() {
-            anyhow::bail!("NetUserGetInfo returned null buffer");
-        }
-        // Cast to USER_INFO_2 pointer
-        let ui2_ptr = buf as *mut USER_INFO_2;
-        let user_info = ui2_ptr.read();
-        // Free buffer allocated by NetUserGetInfo
-        local_free_api_buffer(buf);
-        Ok(user_info)
-    }
+/// Query level 10 (USER_INFO_10) and return a lightweight struct with the fields we need.
+fn query_user_details(servername: Option<&str>, username: &str) -> Result<UserInfo> {
+    let ui10 = get_user_details(servername, username)?;
+    Ok(UserInfo {
+        username: pwstr_to_string(ui10.usri10_name),
+        full_name: pwstr_to_string(ui10.usri10_full_name),
+        comment: pwstr_to_string(ui10.usri10_comment),
+        usr_comment: pwstr_to_string(ui10.usri10_usr_comment),
+        flags: None,
+        password_age: None,
+        privileges: None,
+        home_dir: None,
+        script_path: None,
+        last_logon: None,
+        last_logoff: None,
+        acct_expires: None,
+        workstations: None,
+        max_storage: None,
+        num_logons: None,
+        logon_server: None,
+        country_code: None,
+    })
 }
 
 /// Query groups for `username` on `servername` (may be None).
 fn query_user_groups(servername: Option<&str>, username: &str) -> Result<Vec<String>> {
-    unsafe {
-        let mut buf: *mut core::ffi::c_void = null_mut();
-        let mut entries_read: u32 = 0;
-        let mut total_entries: u32 = 0;
-
-        let server_pw = servername.map(|s| U16CString::from_str(s).unwrap());
-        let server_p: PCWSTR = server_pw
-            .as_ref()
-            .map(|u| PCWSTR(u.as_ptr()))
-            .unwrap_or(PCWSTR::null());
-
-        let name_u = U16CString::from_str(username)
-            .with_context(|| "failed to encode username as UTF-16")?;
-        let name_p: PCWSTR = PCWSTR(name_u.as_ptr());
-
-        // level 0 -> GROUP_USERS_INFO_0 array
-        let level: u32 = 0;
-        // PrefMaxLen uses -1 in WinAPI to mean "preferred maximum length" => represented as u32::MAX
-        let prefmaxlen: u32 = u32::MAX;
-        let status = NetUserGetGroups(
-            server_p,
-            name_p,
-            level,
-            &mut buf as *mut *mut core::ffi::c_void as _,
-            prefmaxlen,
-            &mut entries_read,
-            &mut total_entries,
-        );
-        if status != ERROR_SUCCESS.0 {
-            anyhow::bail!("NetUserGetGroups failed with code {}", status);
-        }
-        let mut groups = Vec::new();
-        if !buf.is_null() && entries_read > 0 {
-            // buf points to an array of GROUP_USERS_INFO_0
-            let arr_ptr = buf as *const GROUP_USERS_INFO_0;
-            for i in 0..entries_read {
-                let item_ptr = arr_ptr.add(i as usize);
-                let item = item_ptr.read();
-                let name = pwstr_to_string(item.grui0_name);
-                if let Some(n) = name {
-                    groups.push(n);
-                }
-            }
-        }
-        local_free_api_buffer(buf);
-        Ok(groups)
-    }
+    get_user_groups(servername, username)
 }
 
-/// Lightweight representation of USER_INFO_10 results (only what we need).
-struct UserInfo10 {
-    username: Option<String>,
-    full_name: Option<String>,
-    /// admin/description comment (usri10_comment)
-    comment: Option<String>,
-    /// user comment (usri10_usr_comment)
-    usr_comment: Option<String>,
-}
-
-/// Query level 10 (USER_INFO_10) and return a lightweight struct with the fields we need.
-fn query_user_info_level10(servername: Option<&str>, username: &str) -> Result<UserInfo10> {
-    unsafe {
-        let mut buf: *mut core::ffi::c_void = null_mut();
-
-        let server_pw = servername.map(|s| U16CString::from_str(s).unwrap());
-        let server_p: PCWSTR = server_pw
-            .as_ref()
-            .map(|u| PCWSTR(u.as_ptr()))
-            .unwrap_or(PCWSTR::null());
-
-        let name_u = U16CString::from_str(username)
-            .with_context(|| "failed to encode username as UTF-16")?;
-        let name_p: PCWSTR = PCWSTR(name_u.as_ptr());
-
-        let level: u32 = 10; // USER_INFO_10
-        let status = NetUserGetInfo(
-            server_p,
-            name_p,
-            level,
-            &mut buf as *mut *mut core::ffi::c_void as _,
-        );
-        if status != ERROR_SUCCESS.0 {
-            anyhow::bail!("NetUserGetInfo(level=10) failed with code {}", status);
-        }
-        if buf.is_null() {
-            anyhow::bail!("NetUserGetInfo(level=10) returned null buffer");
-        }
-        // Cast to USER_INFO_10 pointer
-        let ui10_ptr = buf as *mut USER_INFO_10;
-        let ui10 = ui10_ptr.read();
-        // free buffer
-        local_free_api_buffer(buf);
-        Ok(UserInfo10 {
-            username: pwstr_to_string(ui10.usri10_name),
-            full_name: pwstr_to_string(ui10.usri10_full_name),
-            comment: pwstr_to_string(ui10.usri10_comment),
-            usr_comment: pwstr_to_string(ui10.usri10_usr_comment),
-        })
-    }
-}
-
-fn print_default_fullname(user_info: &USER_INFO_2, username: &str) {
-    let full_name = pwstr_to_string(user_info.usri2_full_name);
-    if let Some(name) = full_name {
-        println!("{}", name);
-    } else {
-        println!("{}", username);
-    }
-}
-
-/// Print summary for level 10 detailed results.
-fn print_detail(info: &UserInfo10) {
-    println!("Name: {}", info.username.as_deref().unwrap_or_default());
-    println!(
-        "Full name: {}",
-        info.full_name.as_deref().unwrap_or_default()
-    );
-
-    // Print both admin/description comment and the user comment when present.
-    if let Some(c) = &info.comment {
-        println!("Comment: {}", c);
-    }
-    if let Some(uc) = &info.usr_comment {
-        println!("User comment: {}", uc);
-    }
-}
-
-/// Print only the full name (or username/fallback) from a level10 result.
-fn print_fullname_from_info10(info: &UserInfo10, fallback_username: &str) {
-    if let Some(full) = &info.full_name {
-        println!("{}", full);
-    } else if let Some(name) = &info.username {
-        println!("{}", name);
-    } else {
-        println!("{}", fallback_username);
-    }
-}
-
-/// Print summary for level 2 extended detailed results.
-fn print_extended_detail(user_info: &USER_INFO_2) {
+/// Print summary detail.
+fn print_detail(user_info: &UserInfo) {
     println!(
         "Name: {}",
-        pwstr_to_string(user_info.usri2_name).unwrap_or_default()
+        user_info.username.as_deref().unwrap_or_default()
     );
     println!(
         "Full name: {}",
-        pwstr_to_string(user_info.usri2_full_name).unwrap_or_default()
+        user_info.full_name.as_deref().unwrap_or_default()
     );
-    println!(
-        "Comment: {}",
-        pwstr_to_string(user_info.usri2_comment).unwrap_or_default()
-    );
-    // Also show the user-entered comment (usri2_usr_comment) if present.
-    println!(
-        "User comment: {}",
-        pwstr_to_string(user_info.usri2_usr_comment).unwrap_or_default()
-    );
-    // Decode and print user flags as human-readable labels.
-    let flags_vec = decode_user_flags(user_info.usri2_flags.0);
-    if flags_vec.is_empty() {
-        println!("User flags: (none)");
-    } else {
-        println!("User flags:");
-        for f in &flags_vec {
-            println!(" - {}", f);
-        }
+    if let Some(comment) = &user_info.comment {
+        println!("Comment: {comment}");
     }
-    let pwd_age_days = seconds_to_days(user_info.usri2_password_age);
-    let day_suffix = if pwd_age_days == 1 { "" } else { "s" };
-    println!("Password age: {} day{}", pwd_age_days, day_suffix);
-    // Show human-readable privilege label instead of numeric value.
-    println!("Privilege level: {}", priv_to_label(user_info.usri2_priv));
-    println!(
-        "Home directory: {}",
-        pwstr_to_string(user_info.usri2_home_dir).unwrap_or_default()
-    );
-    println!(
-        "Script path: {}",
-        pwstr_to_string(user_info.usri2_script_path).unwrap_or_default()
-    );
-    // Some generated USER_INFO_2 bindings do not expose a `usri2_profile` field.
-    // Use `usri2_parms` (typical alternative) when present.
-    println!(
-        "Profile: {}",
-        pwstr_to_string(user_info.usri2_parms).unwrap_or_default()
-    );
-    // Note: do NOT print password fields or other sensitive data
+    if let Some(usr_comment) = &user_info.usr_comment {
+        println!("User comment: {usr_comment}");
+    }
+    if let Some(password_age) = &user_info.password_age {
+        println!("Password age: {password_age} days");
+    }
+    if let Some(flags) = &user_info.flags {
+        println!("Flags: {}", flags.join(", "));
+    }
+    if let Some(privileges) = &user_info.privileges {
+        println!("Privilege level: {privileges}");
+    }
+    if let Some(home_dir) = &user_info.home_dir {
+        println!("Home directory: {home_dir}");
+    }
+    if let Some(script_path) = &user_info.script_path {
+        println!("Script path: {script_path}");
+    }
+    if let Some(last_logon) = &user_info.last_logon {
+        println!("Last logon: {last_logon}");
+    }
+    if let Some(last_logoff) = &user_info.last_logoff {
+        println!("Last logoff: {last_logoff}");
+    }
+    if let Some(acct_expires) = &user_info.acct_expires {
+        println!("Account expires: {acct_expires}");
+    }
+    if let Some(workstations) = &user_info.workstations {
+        println!("Workstations: {workstations}");
+    }
+    if let Some(max_storage) = &user_info.max_storage {
+        println!("Max storage: {max_storage}");
+    }
+    if let Some(num_logons) = &user_info.num_logons {
+        println!("Number of logons: {num_logons}");
+    }
+    if let Some(logon_server) = &user_info.logon_server {
+        println!("Logon server: {logon_server}");
+    }
+    if let Some(country_code) = &user_info.country_code {
+        println!("Country code: {country_code}");
+    }
 }
 
-fn build_user_json_extended_detail(
-    user_info: &USER_INFO_2,
+/// Build a `UserJson` from a UserInfo result .
+fn build_user_json(
+    user_info: &UserInfo,
     groups: Option<&Vec<String>>,
-    include_detail: bool,
     include_groups: bool,
 ) -> UserJson {
     UserJson {
-        username: pwstr_to_string(user_info.usri2_name),
-        full_name: pwstr_to_string(user_info.usri2_full_name),
-
-        // Admin/description comment
-        comment: if include_detail {
-            pwstr_to_string(user_info.usri2_comment)
-        } else {
-            None
-        },
-        // User-entered comment (not always present for USER_INFO_2)
-        user_comment: if include_detail {
-            pwstr_to_string(user_info.usri2_usr_comment)
-        } else {
-            None
-        },
-        user_flags: if include_detail {
-            Some(decode_user_flags(user_info.usri2_flags.0))
-        } else {
-            None
-        },
-        password_age: if include_detail {
-            Some(seconds_to_days(user_info.usri2_password_age) as u32)
-        } else {
-            None
-        },
-        priv_level: if include_detail {
-            Some(priv_to_label(user_info.usri2_priv).to_string())
-        } else {
-            None
-        },
-        home_dir: if include_detail {
-            pwstr_to_string(user_info.usri2_home_dir)
-        } else {
-            None
-        },
-        script_path: if include_detail {
-            pwstr_to_string(user_info.usri2_script_path)
-        } else {
-            None
-        },
-        profile: if include_detail {
-            pwstr_to_string(user_info.usri2_parms)
-        } else {
-            None
-        },
-
+        username: user_info.username.clone(),
+        full_name: user_info.full_name.clone(),
+        comment: user_info.comment.clone(),
+        user_comment: user_info.usr_comment.clone(),
+        flags: user_info.flags.clone(),
+        password_age: user_info.password_age,
+        privileges: user_info.privileges.clone(),
+        home_dir: user_info.home_dir.clone(),
+        script_path: user_info.script_path.clone(),
+        last_logon: user_info.last_logon,
+        last_logoff: user_info.last_logoff,
+        acct_expires: user_info.acct_expires,
+        workstations: user_info.workstations.clone(),
+        max_storage: user_info.max_storage,
+        num_logons: user_info.num_logons,
+        logon_server: user_info.logon_server.clone(),
+        country_code: user_info.country_code,
         groups: if include_groups {
             groups.cloned()
         } else {
             None
         },
-    }
-}
-
-/// Build a `UserJson` from a level-10 result (USER_INFO_10-like).
-/// Level 10 only includes basic name/comment/full_name fields; everything
-/// else remains omitted.
-fn build_user_json_detail(
-    info10: &UserInfo10,
-    groups: Option<&Vec<String>>,
-    include_groups: bool,
-) -> UserJson {
-    UserJson {
-        username: info10.username.clone(),
-        full_name: info10.full_name.clone(),
-
-        // include both admin comment and user comment when present
-        comment: info10.comment.clone(),
-        user_comment: info10.usr_comment.clone(),
-        user_flags: None,
-        password_age: None,
-        priv_level: None,
-        home_dir: None,
-        script_path: None,
-        profile: None,
-
-        groups: if include_groups {
-            groups.cloned()
-        } else {
-            None
-        },
-    }
-}
-
-fn priv_to_label(
-    priv_val: windows::Win32::NetworkManagement::NetManagement::USER_PRIV,
-) -> &'static str {
-    match priv_val.0 {
-        0 => "Guest",
-        1 => "User",
-        2 => "Administrator",
-        _ => "Unknown",
     }
 }
 
 /// Convert a duration in seconds to whole days (truncating).
-fn seconds_to_days(seconds: u32) -> u64 {
-    (seconds as u64) / 86_400
-}
-
-fn decode_user_flags(flags: u32) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-
-    if (flags & UF_SCRIPT.0) != 0 {
-        out.push("Script".to_string());
-    }
-    if (flags & UF_ACCOUNTDISABLE.0) != 0 {
-        out.push("Account disabled".to_string());
-    }
-    if (flags & UF_HOMEDIR_REQUIRED.0) != 0 {
-        out.push("Home directory required".to_string());
-    }
-    if (flags & UF_LOCKOUT.0) != 0 {
-        out.push("Locked out".to_string());
-    }
-    if (flags & UF_PASSWD_NOTREQD.0) != 0 {
-        out.push("Password not required".to_string());
-    }
-    if (flags & UF_PASSWD_CANT_CHANGE.0) != 0 {
-        out.push("Cannot change password".to_string());
-    }
-    if (flags & UF_ENCRYPTED_TEXT_PASSWORD_ALLOWED.0) != 0 {
-        out.push("Encrypted text password allowed".to_string());
-    }
-    if (flags & UF_TEMP_DUPLICATE_ACCOUNT) != 0 {
-        out.push("Temporary duplicate account".to_string());
-    }
-    if (flags & UF_NORMAL_ACCOUNT) != 0 {
-        out.push("Normal account".to_string());
-    }
-    if (flags & UF_INTERDOMAIN_TRUST_ACCOUNT) != 0 {
-        out.push("Interdomain trust account".to_string());
-    }
-    if (flags & UF_WORKSTATION_TRUST_ACCOUNT) != 0 {
-        out.push("Workstation trust account".to_string());
-    }
-    if (flags & UF_SERVER_TRUST_ACCOUNT) != 0 {
-        out.push("Server trust account".to_string());
-    }
-    if (flags & UF_DONT_EXPIRE_PASSWD.0) != 0 {
-        out.push("Password does not expire".to_string());
-    }
-    if (flags & UF_SMARTCARD_REQUIRED.0) != 0 {
-        out.push("Smartcard required".to_string());
-    }
-    if (flags & UF_TRUSTED_FOR_DELEGATION.0) != 0 {
-        out.push("Trusted for delegation".to_string());
-    }
-    if (flags & UF_NOT_DELEGATED.0) != 0 {
-        out.push("Not delegated".to_string());
-    }
-    if (flags & UF_USE_DES_KEY_ONLY.0) != 0 {
-        out.push("Use DES key only".to_string());
-    }
-    if (flags & UF_DONT_REQUIRE_PREAUTH.0) != 0 {
-        out.push("Does not require preauth".to_string());
-    }
-    if (flags & UF_PARTIAL_SECRETS_ACCOUNT) != 0 {
-        out.push("Partial secrets account".to_string());
-    }
-
-    out
-}
-
-#[derive(Debug, PartialEq, Eq)]
-enum ReqLevel {
-    Level2,
-    Level10,
-}
-
-fn decide_req_level(extended_details: bool) -> ReqLevel {
-    // Extended details explicitly requested -> level2
-    if extended_details {
-        ReqLevel::Level2
-    // Default to level10 when nothing is explicitly requested (keeps behavior conservative)
-    } else {
-        ReqLevel::Level10
-    }
+fn seconds_to_days(seconds: u32) -> u32 {
+    (seconds) / 86_400
 }
 
 fn main() -> Result<()> {
@@ -572,50 +302,61 @@ fn main() -> Result<()> {
     // Pass an Option<&str> to existing query functions
     let servername = server_opt.as_deref();
 
-    // Decide which information level to request:
-    // - If the user asked for extended details -> level 2 (USER_INFO_2)
-    // - Else if the user asked for details -> level 10 (USER_INFO_10)
-    // - Else if JSON was requested but no detail flags -> use level 10 for minimal JSON
-    let req_level = decide_req_level(cli.extended_details);
-
     // Fetch data according to requested level, with the same fallback behavior (try DC, then local)
-    let mut info2_opt: Option<USER_INFO_2> = None;
-    let mut info10_opt: Option<UserInfo10> = None;
+    let user_info_opt: Option<UserInfo>;
 
-    match req_level {
-        ReqLevel::Level2 => match query_user_info(servername, &cli.username) {
-            Ok(u) => info2_opt = Some(u),
+    if cli.extended_details {
+        match query_user_extended_details(servername, &cli.username) {
+            Ok(u10) => user_info_opt = Some(u10),
             Err(e) => {
                 if servername.is_some() {
-                    eprintln!(
-                            "warning: failed to query user info using DC ({}). Falling back to local queries.",
-                            e
-                        );
-                    info2_opt = Some(query_user_info(None, &cli.username).with_context(|| {
-                        "failed to query user info (fallback) - ensure you have privileges"
-                    })?);
+                    eprintln!("warning: failed to query user info using DC ({e}). Falling back to local queries.");
+                    user_info_opt = Some(
+                        query_user_extended_details(None, &cli.username).with_context(|| {
+                            "failed to query user info (fallback) - ensure you have privileges"
+                        })?,
+                    );
                 } else {
                     return Err(e).context("failed to query user info");
                 }
             }
-        },
-        ReqLevel::Level10 => match query_user_info_level10(servername, &cli.username) {
-            Ok(u10) => info10_opt = Some(u10),
+        }
+    } else if cli.details {
+        match query_user_details(servername, &cli.username) {
+            Ok(u10) => user_info_opt = Some(u10),
             Err(e) => {
                 if servername.is_some() {
-                    eprintln!(
-                            "warning: failed to query user info using DC ({}). Falling back to local queries.",
-                            e
-                        );
-                    info10_opt = Some(query_user_info_level10(None, &cli.username).with_context(
-                        || "failed to query user info (fallback) - ensure you have privileges",
-                    )?);
+                    eprintln!("warning: failed to query user info using DC ({e}). Falling back to local queries.");
+                    user_info_opt =
+                        Some(query_user_details(None, &cli.username).with_context(|| {
+                            "failed to query user info (fallback) - ensure you have privileges"
+                        })?);
                 } else {
                     return Err(e).context("failed to query user info");
                 }
             }
-        },
-    }
+        }
+    } else {
+        user_info_opt = Some(UserInfo {
+            username: Some(cli.username.to_owned()),
+            full_name: None,
+            comment: None,
+            usr_comment: None,
+            flags: None,
+            password_age: None,
+            privileges: None,
+            home_dir: None,
+            script_path: None,
+            last_logon: None,
+            last_logoff: None,
+            acct_expires: None,
+            workstations: None,
+            max_storage: None,
+            num_logons: None,
+            logon_server: None,
+            country_code: None,
+        })
+    };
 
     // Only query groups when the user explicitly requested --groups.
     // Previously groups were queried when --json was set; now we restrict to -g/--groups only.
@@ -624,19 +365,16 @@ fn main() -> Result<()> {
             Ok(g) => Some(g),
             Err(e) => {
                 if servername.is_some() {
-                    eprintln!(
-                        "warning: failed to query groups using DC ({}). Falling back to local queries.",
-                        e
-                    );
+                    eprintln!("warning: failed to query groups using DC ({e}). Falling back to local queries.");
                     match query_user_groups(None, &cli.username) {
                         Ok(g2) => Some(g2),
                         Err(e2) => {
-                            eprintln!("failed to query groups (fallback): {}", e2);
+                            eprintln!("failed to query groups (fallback): {e2}");
                             None
                         }
                     }
                 } else {
-                    eprintln!("failed to query groups: {}", e);
+                    eprintln!("failed to query groups: {e}");
                     None
                 }
             }
@@ -650,85 +388,70 @@ fn main() -> Result<()> {
         // Build JSON according to the information we have:
         // - If we fetched level2, use the existing USER_INFO_2 builder (detailed).
         // - If we fetched level10 (or minimal), use the level10 builder.
-        let json = if let Some(ui2) = info2_opt.as_ref() {
+        let json = if let Some(user_info) = user_info_opt.as_ref() {
             // include_detail true because level2 is the extended details
-            build_user_json_extended_detail(ui2, groups_result.as_ref(), true, cli.groups)
-        } else if let Some(ui10) = info10_opt.as_ref() {
-            // level10 builder: only username, full_name and comment are populated
-            build_user_json_detail(ui10, groups_result.as_ref(), cli.groups)
+            build_user_json(user_info, groups_result.as_ref(), cli.groups)
         } else {
-            // As a last resort, emit minimal JSON with username only
-            serde_json::to_value(&UserJson {
-                username: Some(cli.username.clone()),
-                full_name: None,
-                comment: None,
-                user_comment: None,
-                user_flags: None,
-                password_age: None,
-                priv_level: None,
-                home_dir: None,
-                script_path: None,
-                profile: None,
-                groups: None,
-            })?;
             // print the minimal object
-            let minimal = UserJson {
+            UserJson {
                 username: Some(cli.username.clone()),
                 full_name: None,
                 comment: None,
                 user_comment: None,
-                user_flags: None,
+                flags: None,
                 password_age: None,
-                priv_level: None,
+                privileges: None,
                 home_dir: None,
                 script_path: None,
-                profile: None,
+                last_logon: None,
+                last_logoff: None,
+                acct_expires: None,
+                workstations: None,
+                max_storage: None,
+                num_logons: None,
+                logon_server: None,
+                country_code: None,
                 groups: None,
-            };
-            let j = serde_json::to_string_pretty(&minimal)?;
-            println!("{}", j);
-            return Ok(());
+            }
         };
         let j = serde_json::to_string_pretty(&json)?;
-        println!("{}", j);
+        println!("{j}");
         return Ok(());
     }
 
     // Default behavior: if no detail/groups flags, print only the full name (use level 10)
     if !cli.details && !cli.extended_details && !cli.groups {
         // No detail flags requested and no groups: show only full name using level10 when available.
-        if let Some(ui10) = info10_opt.as_ref() {
-            print_fullname_from_info10(ui10, &cli.username);
-        } else if let Some(ui2) = info2_opt.as_ref() {
-            // Fallback to USER_INFO_2 based fullname
-            print_default_fullname(ui2, &cli.username);
+        if let Some(user_info) = user_info_opt.as_ref() {
+            if let Some(full_name) = &user_info.full_name {
+                println!("{full_name}");
+            } else if let Some(name) = &user_info.username {
+                println!("{name}");
+            } else {
+                println!("{}", cli.username.to_owned());
+            }
         } else {
             // As a very conservative fallback
             println!("{}", &cli.username);
         }
         return Ok(());
-    }
-
-    // If detailed, print all fields
-    if cli.details {
-        if let Some(ui10) = info10_opt.as_ref() {
-            print_detail(ui10);
-        }
-    } else if cli.extended_details {
-        if let Some(ui2) = info2_opt.as_ref() {
-            print_extended_detail(ui2);
-        }
-    }
-
-    // If groups requested, print them
-    if cli.groups {
-        if let Some(gs) = groups_result {
-            println!("Groups:");
-            for g in gs {
-                println!(" - {}", g);
+    } else {
+        // If detailed, print all fields
+        if cli.details || cli.extended_details {
+            if let Some(user_info) = user_info_opt.as_ref() {
+                print_detail(user_info);
             }
-        } else {
-            println!("Groups: (none or failed to enumerate)");
+        }
+        // If groups requested, print them
+        if cli.groups {
+            if let Some(gs) = groups_result {
+                println!("Groups:");
+                for g in gs {
+                    println!(" - {g}");
+                }
+            } else {
+                println!("Groups: (none or failed to enumerate)");
+            }
         }
     }
 
@@ -737,67 +460,7 @@ fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::UF_TEMP_DUPLICATE_ACCOUNT;
-    use super::{decode_user_flags, normalize_server_input, priv_to_label, seconds_to_days};
-    use std::mem;
-    use windows::Win32::NetworkManagement::NetManagement::{USER_ACCOUNT_FLAGS, USER_PRIV};
-
-    // Helper: create a USER_INFO_2-backed TestUser structure that keeps UTF-16 buffers alive.
-    struct TestUserInfo {
-        _name: widestring::U16CString,
-        _full: widestring::U16CString,
-        _comment: widestring::U16CString,
-        _home: widestring::U16CString,
-        _script: widestring::U16CString,
-        _parms: widestring::U16CString,
-        ui: super::USER_INFO_2,
-    }
-
-    fn make_test_userinfo(
-        name: &str,
-        full: &str,
-        comment: &str,
-        home: &str,
-        script: &str,
-        parms: &str,
-        flags: u32,
-        pwd_age_secs: u32,
-        priv_val: USER_PRIV,
-    ) -> TestUserInfo {
-        use widestring::U16CString;
-        use windows::core::PWSTR;
-
-        let name_u = U16CString::from_str(name).unwrap();
-        let full_u = U16CString::from_str(full).unwrap();
-        let comment_u = U16CString::from_str(comment).unwrap();
-        let home_u = U16CString::from_str(home).unwrap();
-        let script_u = U16CString::from_str(script).unwrap();
-        let parms_u = U16CString::from_str(parms).unwrap();
-
-        unsafe {
-            let mut ui: super::USER_INFO_2 = mem::zeroed();
-            ui.usri2_name = PWSTR(name_u.as_ptr() as *mut _);
-            ui.usri2_full_name = PWSTR(full_u.as_ptr() as *mut _);
-            ui.usri2_comment = PWSTR(comment_u.as_ptr() as *mut _);
-            ui.usri2_home_dir = PWSTR(home_u.as_ptr() as *mut _);
-            ui.usri2_script_path = PWSTR(script_u.as_ptr() as *mut _);
-            ui.usri2_parms = PWSTR(parms_u.as_ptr() as *mut _);
-
-            ui.usri2_flags = USER_ACCOUNT_FLAGS(flags);
-            ui.usri2_password_age = pwd_age_secs;
-            ui.usri2_priv = priv_val;
-
-            TestUserInfo {
-                _name: name_u,
-                _full: full_u,
-                _comment: comment_u,
-                _home: home_u,
-                _script: script_u,
-                _parms: parms_u,
-                ui,
-            }
-        }
-    }
+    use super::{build_user_json, normalize_server_input, print_detail, seconds_to_days, UserInfo};
 
     #[test]
     fn normalize_various_inputs() {
@@ -833,28 +496,15 @@ mod tests {
     }
 
     #[test]
-    fn priv_to_label_values() {
-        assert_eq!(priv_to_label(USER_PRIV(0)), "Guest");
-        assert_eq!(priv_to_label(USER_PRIV(1)), "User");
-        assert_eq!(priv_to_label(USER_PRIV(2)), "Administrator");
-        // unknown -> Unknown
-        assert_eq!(priv_to_label(USER_PRIV(99)), "Unknown");
-    }
-
-    #[test]
-    fn decode_user_flags_empty() {
-        let labels = decode_user_flags(0);
-        assert!(labels.is_empty());
-    }
-
-    #[test]
-    fn decode_user_flags_single_known() {
-        // Use a UF_* constant that is available in the bindings and known to be checked
-        // by decode_user_flags; this asserts the mapping exists.
-        let labels = decode_user_flags(UF_TEMP_DUPLICATE_ACCOUNT);
-        assert!(labels
-            .iter()
-            .any(|s| s.contains("Temporary duplicate account")));
+    fn normalize_preserves_case() {
+        assert_eq!(
+            normalize_server_input(Some("DC01")),
+            Some(String::from("\\\\DC01"))
+        );
+        assert_eq!(
+            normalize_server_input(Some("\\\\\\DC01")),
+            Some(String::from("\\\\\\DC01"))
+        );
     }
 
     #[test]
@@ -867,33 +517,44 @@ mod tests {
     }
 
     #[test]
-    fn build_user_json_from_fake_user_info() {
-        let t = make_test_userinfo(
-            "alice",
-            "Alice Example",
-            "Test comment",
-            r"C:\Users\alice",
-            "login.bat",
-            "profile_path",
-            super::UF_ACCOUNTDISABLE.0 as u32,
-            86_400,
-            USER_PRIV(2),
-        );
+    fn seconds_to_days_zero() {
+        assert_eq!(seconds_to_days(0), 0);
+    }
 
-        let uj = super::build_user_json_extended_detail(&t.ui, None, true, false);
+    #[test]
+    fn seconds_to_days_one_day() {
+        assert_eq!(seconds_to_days(86400), 1);
+    }
 
-        assert_eq!(uj.username.as_deref(), Some("alice"));
-        assert_eq!(uj.full_name.as_deref(), Some("Alice Example"));
-        assert_eq!(uj.comment.as_deref(), Some("Test comment"));
+    #[test]
+    fn seconds_to_days_just_under_one_day() {
+        assert_eq!(seconds_to_days(86399), 0);
+    }
 
-        let flags = uj.user_flags.expect("expected user_flags");
-        assert!(flags.iter().any(|s| s.contains("Account disabled")));
+    #[test]
+    fn seconds_to_days_two_days() {
+        assert_eq!(seconds_to_days(172800), 2);
+    }
 
-        assert_eq!(uj.password_age, Some(1));
-        assert_eq!(uj.priv_level.as_deref(), Some("Administrator"));
-        assert_eq!(uj.home_dir.as_deref(), Some(r"C:\Users\alice"));
-        assert_eq!(uj.script_path.as_deref(), Some("login.bat"));
-        assert_eq!(uj.profile.as_deref(), Some("profile_path"));
+    #[test]
+    fn seconds_to_days_max_value() {
+        assert_eq!(seconds_to_days(u32::MAX), u32::MAX / 86400);
+    }
+
+    #[test]
+    fn seconds_to_days_just_over_one_day() {
+        assert_eq!(seconds_to_days(86401), 1);
+    }
+
+    #[test]
+    fn seconds_to_days_one_second() {
+        assert_eq!(seconds_to_days(1), 0);
+    }
+
+    #[test]
+    fn seconds_to_days_large_value() {
+        // 365 days worth of seconds
+        assert_eq!(seconds_to_days(365 * 86400), 365);
     }
 
     #[test]
@@ -903,32 +564,62 @@ mod tests {
             clap::Parser::try_parse_from(&["netuser", "-d", "alice"]).unwrap();
         assert!(c.details);
         assert!(!c.extended_details);
+        assert_eq!(c.username, "alice".to_string());
 
         let c2: super::CmdLineOptions =
             clap::Parser::try_parse_from(&["netuser", "-e", "alice"]).unwrap();
         assert!(c2.extended_details);
         assert!(!c2.details);
+        assert_eq!(c2.username, "alice".to_string());
+
+        let c3: super::CmdLineOptions =
+            clap::Parser::try_parse_from(&["netuser", "alice", "-s", "domain_controller", "-j"])
+                .unwrap();
+        assert!(c3.json);
+        assert_eq!(c3.server, Some("domain_controller".to_string()));
+        assert_eq!(c3.username, "alice".to_string());
     }
 
     #[test]
-    fn decide_req_level_tests() {
-        use super::ReqLevel;
-        // default/no flags => level10 (conservative)
-        assert_eq!(super::decide_req_level(false), ReqLevel::Level10);
-        // explicit extended details => level2
-        assert_eq!(super::decide_req_level(true), ReqLevel::Level2);
+    fn cli_long_flags_parse() {
+        let args = vec![
+            "netuser".to_string(),
+            "alice".to_string(),
+            "--server".to_string(),
+            "domain_controller".to_string(),
+            "--json".to_string(),
+            "--extended-details".to_string(),
+        ];
+        let c: super::CmdLineOptions = clap::Parser::try_parse_from(args).unwrap();
+        assert!(c.json);
+        assert!(c.extended_details);
+        assert_eq!(c.server, Some("domain_controller".to_string()));
+        assert_eq!(c.username, "alice".to_string());
     }
 
     #[test]
-    fn json_output_detail_contains_expected_fields_and_no_nulls() {
+    fn json_output_detail_contains_expected_fields_with_nones() {
         // Create a simple UserInfo10 and ensure JSON output contains expected keys and no nulls.
-        let info10 = super::UserInfo10 {
+        let info10 = super::UserInfo {
             username: Some("bob".into()),
             full_name: Some("Bob Example".into()),
             comment: Some("A comment".into()),
             usr_comment: Some("A user comment".into()),
+            password_age: None,
+            flags: None,
+            privileges: None,
+            home_dir: None,
+            script_path: None,
+            last_logon: None,
+            last_logoff: None,
+            acct_expires: None,
+            workstations: None,
+            max_storage: None,
+            num_logons: None,
+            logon_server: None,
+            country_code: None,
         };
-        let uj = super::build_user_json_detail(&info10, None, false);
+        let uj = super::build_user_json(&info10, None, false);
         let s = serde_json::to_string(&uj).unwrap();
         // must contain username and full_name and comments, must not contain the string "null"
         assert!(s.contains("\"username\""));
@@ -940,24 +631,295 @@ mod tests {
     }
 
     #[test]
-    fn json_output_extended_detail_contains_expected_fields_and_no_nulls() {
-        // Build a USER_INFO_2 and ensure JSON output (detailed) contains fields like password_age and user_flags
-        let t = make_test_userinfo(
-            "carol",
-            "Carol Example",
-            "Another comment",
-            r"C:\Users\carol",
-            "start.bat",
-            "parms",
-            super::UF_TEMP_DUPLICATE_ACCOUNT,
-            86_400 * 2,
-            USER_PRIV(1),
-        );
-        let uj = super::build_user_json_extended_detail(&t.ui, None, true, false);
-        let s = serde_json::to_string(&uj).unwrap();
-        assert!(s.contains("\"password_age\""));
-        assert!(s.contains("\"user_flags\""));
-        // No nulls should be present thanks to serde skip_serializing_if
-        assert!(!s.contains("null"));
+    fn json_output_detail_contains_expected_fields_and_no_nulls() {
+        let user_info = super::UserInfo {
+            username: Some("admin".into()),
+            full_name: Some("Administrator".into()),
+            comment: Some("Built-in account".into()),
+            usr_comment: Some("System admin".into()),
+            flags: Some(vec![
+                "Normal account".to_string(),
+                "Password does not expire".to_string(),
+            ]),
+            password_age: Some(0),
+            privileges: Some("Administrator".into()),
+            home_dir: Some("C:\\Users\\admin".into()),
+            script_path: Some("logon.bat".into()),
+            last_logon: Some(3),
+            last_logoff: Some(2),
+            acct_expires: Some(1),
+            workstations: Some("All".into()),
+            max_storage: Some(0),
+            num_logons: Some(42),
+            logon_server: Some("\\\\DC01".into()),
+            country_code: Some(44),
+        };
+
+        let groups = vec![
+            "Administrators".to_string(),
+            "Users".to_string(),
+            "Remote Desktop Users".to_string(),
+        ];
+
+        let json = build_user_json(&user_info, Some(&groups), true);
+
+        assert_eq!(json.username, Some("admin".to_string()));
+        assert_eq!(json.full_name, Some("Administrator".to_string()));
+        assert_eq!(json.comment, Some("Built-in account".to_string()));
+        assert_eq!(json.user_comment, Some("System admin".to_string()));
+        assert_eq!(json.privileges, Some("Administrator".to_string()));
+        assert_eq!(json.home_dir, Some("C:\\Users\\admin".to_string()));
+        assert_eq!(json.script_path, Some("logon.bat".to_string()));
+        assert_eq!(json.last_logon, Some(3));
+        assert_eq!(json.last_logoff, Some(2));
+        assert_eq!(json.acct_expires, Some(1));
+        assert_eq!(json.workstations, Some("All".to_string()));
+        assert_eq!(json.max_storage, Some(0));
+        assert_eq!(json.num_logons, Some(42));
+        assert_eq!(json.logon_server, Some("\\\\DC01".to_string()));
+        assert_eq!(json.country_code, Some(44));
+        assert_eq!(json.groups, Some(groups));
+    }
+
+    #[test]
+    fn build_user_json_maps_all_fields() {
+        let user_info = UserInfo {
+            username: Some("testuser".to_string()),
+            full_name: Some("Test User".to_string()),
+            comment: Some("A comment".to_string()),
+            usr_comment: Some("User comment".to_string()),
+            flags: Some(vec!["Script".to_string()]),
+            password_age: Some(30),
+            privileges: Some("User".to_string()),
+            home_dir: Some("C:\\home".to_string()),
+            script_path: Some("script.bat".to_string()),
+            last_logon: Some(0),
+            last_logoff: Some(0),
+            acct_expires: Some(0),
+            workstations: Some("WS1".to_string()),
+            max_storage: Some(0),
+            num_logons: Some(5),
+            logon_server: Some("DC1".to_string()),
+            country_code: Some(0),
+        };
+
+        let groups = vec!["Admins".to_string(), "Users".to_string()];
+        let json = build_user_json(&user_info, Some(&groups), true);
+
+        assert_eq!(json.username, Some("testuser".to_string()));
+        assert_eq!(json.full_name, Some("Test User".to_string()));
+        assert_eq!(json.comment, Some("A comment".to_string()));
+        assert_eq!(json.user_comment, Some("User comment".to_string()));
+        assert_eq!(json.privileges, Some("User".to_string()));
+        assert_eq!(json.home_dir, Some("C:\\home".to_string()));
+        assert_eq!(json.script_path, Some("script.bat".to_string()));
+        assert_eq!(json.last_logon, Some(0));
+        assert_eq!(json.last_logoff, Some(0));
+        assert_eq!(json.acct_expires, Some(0));
+        assert_eq!(json.workstations, Some("WS1".to_string()));
+        assert_eq!(json.max_storage, Some(0));
+        assert_eq!(json.num_logons, Some(5));
+        assert_eq!(json.logon_server, Some("DC1".to_string()));
+        assert_eq!(json.country_code, Some(0));
+        assert_eq!(json.groups, Some(groups));
+    }
+
+    #[test]
+    fn build_user_json_empty_optional_fields_become_none() {
+        let user_info = UserInfo {
+            username: Some("testuser".to_string()),
+            full_name: Some("".to_string()),
+            comment: Some("".to_string()),
+            usr_comment: Some("".to_string()),
+            flags: Some(vec![]),
+            password_age: Some(0),
+            privileges: Some("User".to_string()),
+            home_dir: Some("".to_string()),
+            script_path: Some("".to_string()),
+            last_logon: Some(0),
+            last_logoff: Some(0),
+            acct_expires: Some(0),
+            workstations: Some("".to_string()),
+            max_storage: Some(0),
+            num_logons: Some(0),
+            logon_server: Some("".to_string()),
+            country_code: Some(0),
+        };
+
+        let json = build_user_json(&user_info, None, false);
+
+        assert_eq!(json.username, Some("testuser".to_string()));
+        assert_eq!(json.full_name, Some("".to_string()));
+        assert_eq!(json.comment, Some("".to_string()));
+        assert_eq!(json.user_comment, Some("".to_string()));
+        assert_eq!(json.home_dir, Some("".to_string()));
+        assert_eq!(json.script_path, Some("".to_string()));
+        assert_eq!(json.last_logon, Some(0));
+        assert_eq!(json.last_logoff, Some(0));
+        assert_eq!(json.acct_expires, Some(0));
+        assert_eq!(json.workstations, Some("".to_string()));
+        assert_eq!(json.max_storage, Some(0));
+        assert_eq!(json.logon_server, Some("".to_string()));
+        assert_eq!(json.country_code, Some(0));
+        assert_eq!(json.groups, None);
+    }
+
+    #[test]
+    fn build_user_json_preserves_whitespace_in_fields() {
+        let user_info = UserInfo {
+            username: Some("user1".to_string()),
+            full_name: Some("  Name With Spaces  ".to_string()),
+            comment: Some("  comment  ".to_string()),
+            usr_comment: Some("  ".to_string()),
+            flags: Some(vec![]),
+            password_age: Some(0),
+            privileges: Some("User".to_string()),
+            home_dir: Some("  C:\\path  ".to_string()),
+            script_path: Some("".to_string()),
+            last_logon: Some(0),
+            last_logoff: Some(0),
+            acct_expires: Some(0),
+            workstations: Some("".to_string()),
+            max_storage: Some(0),
+            num_logons: Some(0),
+            logon_server: Some("".to_string()),
+            country_code: Some(0),
+        };
+
+        let json = build_user_json(&user_info, None, false);
+
+        // Whitespace-only strings are preserved as-is by build_user_json
+        assert_eq!(json.user_comment, Some("  ".to_string()));
+        // Strings with content plus whitespace are preserved
+        assert_eq!(json.full_name, Some("  Name With Spaces  ".to_string()));
+        assert_eq!(json.comment, Some("  comment  ".to_string()));
+    }
+
+    #[test]
+    fn build_user_json_empty_groups_returns_none() {
+        let user_info = UserInfo {
+            username: Some("user1".to_string()),
+            full_name: Some("Test".to_string()),
+            comment: Some("".to_string()),
+            usr_comment: Some("".to_string()),
+            flags: Some(vec![]),
+            password_age: Some(0),
+            privileges: Some("User".to_string()),
+            home_dir: Some("".to_string()),
+            script_path: Some("".to_string()),
+            last_logon: Some(0),
+            last_logoff: Some(0),
+            acct_expires: Some(0),
+            workstations: Some("".to_string()),
+            max_storage: Some(0),
+            num_logons: Some(0),
+            logon_server: Some("".to_string()),
+            country_code: Some(0),
+        };
+
+        let json = build_user_json(&user_info, None, false);
+        assert_eq!(json.groups, None);
+    }
+
+    #[test]
+    fn build_user_json_single_group() {
+        let user_info = UserInfo {
+            username: Some("user1".to_string()),
+            full_name: Some("Test".to_string()),
+            comment: Some("".to_string()),
+            usr_comment: Some("".to_string()),
+            flags: Some(vec![]),
+            password_age: Some(0),
+            privileges: Some("User".to_string()),
+            home_dir: Some("".to_string()),
+            script_path: Some("".to_string()),
+            last_logon: Some(0),
+            last_logoff: Some(0),
+            acct_expires: Some(0),
+            workstations: Some("".to_string()),
+            max_storage: Some(0),
+            num_logons: Some(0),
+            logon_server: Some("".to_string()),
+            country_code: Some(0),
+        };
+
+        let groups = vec!["Developers".to_string()];
+        let json = build_user_json(&user_info, Some(&groups), true);
+        assert_eq!(json.groups, Some(groups));
+    }
+
+    #[test]
+    fn print_detail_does_not_panic() {
+        // Smoke test: ensure print_detail handles typical user info without panicking
+        let user_info = UserInfo {
+            username: Some("test".to_string()),
+            full_name: Some("Test User".to_string()),
+            comment: Some("Test comment".to_string()),
+            usr_comment: Some("User comment".to_string()),
+            flags: Some(vec!["Script".to_string(), "Normal account".to_string()]),
+            password_age: Some(10),
+            privileges: Some("User".to_string()),
+            home_dir: Some("C:\\home\\test".to_string()),
+            script_path: Some("logon.bat".to_string()),
+            last_logon: Some(10),
+            last_logoff: Some(10),
+            acct_expires: Some(10),
+            workstations: Some("WS1,WS2".to_string()),
+            max_storage: Some(0),
+            num_logons: Some(42),
+            logon_server: Some("\\\\DC01".to_string()),
+            country_code: Some(0),
+        };
+        print_detail(&user_info);
+    }
+
+    #[test]
+    fn print_detail_empty_optional_fields() {
+        // Smoke test with minimal fields
+        let user_info = UserInfo {
+            username: Some("minimal".to_string()),
+            full_name: Some("".to_string()),
+            comment: Some("".to_string()),
+            usr_comment: Some("".to_string()),
+            flags: Some(vec![]),
+            password_age: Some(0),
+            privileges: Some("User".to_string()),
+            home_dir: Some("".to_string()),
+            script_path: Some("".to_string()),
+            last_logon: Some(0),
+            last_logoff: Some(0),
+            acct_expires: Some(0),
+            workstations: Some("".to_string()),
+            max_storage: Some(0),
+            num_logons: Some(0),
+            logon_server: Some("".to_string()),
+            country_code: Some(0),
+        };
+        print_detail(&user_info);
+    }
+
+    #[test]
+    fn print_detail_special_characters() {
+        // Smoke test with special characters in fields
+        let user_info = UserInfo {
+            username: Some("user@domain".to_string()),
+            full_name: Some("User, First M. Last (ID: 123)".to_string()),
+            comment: Some("Comment with \"quotes\" and 'apostrophes'".to_string()),
+            usr_comment: Some("Unicode: café, 日本語".to_string()),
+            flags: Some(vec!["Account disabled".to_string()]),
+            password_age: Some(0),
+            privileges: Some("User".to_string()),
+            home_dir: Some("\\\\server\\share\\user@domain".to_string()),
+            script_path: Some("".to_string()),
+            last_logon: Some(0),
+            last_logoff: Some(0),
+            acct_expires: Some(0),
+            workstations: Some("".to_string()),
+            max_storage: Some(0),
+            num_logons: Some(0),
+            logon_server: Some("".to_string()),
+            country_code: Some(0),
+        };
+        print_detail(&user_info);
     }
 }
