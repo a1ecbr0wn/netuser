@@ -19,8 +19,8 @@ use clap::Parser;
 use options::CmdLineOptions;
 use serde::Serialize;
 use winapi::{
-    decode_privileges, decode_user_flags, get_domain_controller_name, get_user_details,
-    get_user_extended_details, get_user_groups, pwstr_to_string,
+    decode_privileges, get_domain_controller_name, get_user_details, get_user_extended_details,
+    get_user_groups, pwstr_to_string,
 };
 
 /// Lightweight representation of user info results.
@@ -33,22 +33,16 @@ struct UserInfo {
     comment: Option<String>,
     /// user comment
     usr_comment: Option<String>,
-    /// user flags
-    flags: Option<Vec<String>>,
     /// password age
     password_age: Option<u32>,
     /// user privileges
     privileges: Option<String>,
     /// user home directory
     home_dir: Option<String>,
-    /// user script path
-    script_path: Option<String>,
     /// user last logon time
     last_logon: Option<u32>,
     /// user last logoff time
     last_logoff: Option<u32>,
-    /// user account expiration time
-    acct_expires: Option<u32>,
     /// workstations
     workstations: Option<String>,
     /// max storage
@@ -72,21 +66,15 @@ struct UserJson {
     #[serde(skip_serializing_if = "Option::is_none")]
     user_comment: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    flags: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     password_age: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     privileges: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     home_dir: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    script_path: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     last_logon: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     last_logoff: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    acct_expires: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     workstations: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -133,27 +121,24 @@ fn normalize_server_input(s: Option<&str>) -> Option<String> {
 
 // Functions querying the Windows API for user information.
 
-/// Query basic USER_INFO_2 for `username` on `servername` (which may be None for local).
+/// Query basic USER_INFO_11 for `username` on `servername` (which may be None for local).
 fn query_user_extended_details(servername: Option<&str>, username: &str) -> Result<UserInfo> {
-    let ui2 = get_user_extended_details(servername, username)?;
+    let ui11 = get_user_extended_details(servername, username)?;
     Ok(UserInfo {
-        username: pwstr_to_string(ui2.usri2_name),
-        full_name: pwstr_to_string(ui2.usri2_full_name),
-        comment: pwstr_to_string(ui2.usri2_comment),
-        usr_comment: pwstr_to_string(ui2.usri2_usr_comment),
-        password_age: Some(seconds_to_days(ui2.usri2_password_age)),
-        flags: decode_user_flags(ui2.usri2_flags.0),
-        privileges: Some(decode_privileges(ui2.usri2_priv).to_string()),
-        home_dir: pwstr_to_string(ui2.usri2_home_dir),
-        script_path: pwstr_to_string(ui2.usri2_script_path),
-        last_logon: Some(seconds_to_days(ui2.usri2_last_logon)),
-        last_logoff: Some(seconds_to_days(ui2.usri2_last_logoff)),
-        acct_expires: Some(seconds_to_days(ui2.usri2_acct_expires)),
-        workstations: pwstr_to_string(ui2.usri2_workstations),
-        max_storage: Some(ui2.usri2_max_storage),
-        num_logons: Some(ui2.usri2_num_logons),
-        logon_server: pwstr_to_string(ui2.usri2_logon_server),
-        country_code: Some(ui2.usri2_country_code),
+        username: pwstr_to_string(ui11.usri11_name),
+        full_name: pwstr_to_string(ui11.usri11_full_name),
+        comment: pwstr_to_string(ui11.usri11_comment),
+        usr_comment: pwstr_to_string(ui11.usri11_usr_comment),
+        password_age: Some(seconds_to_days(ui11.usri11_password_age)),
+        privileges: Some(decode_privileges(ui11.usri11_priv).to_string()),
+        home_dir: pwstr_to_string(ui11.usri11_home_dir),
+        last_logon: Some(seconds_to_days(ui11.usri11_last_logon)),
+        last_logoff: Some(seconds_to_days(ui11.usri11_last_logoff)),
+        workstations: pwstr_to_string(ui11.usri11_workstations),
+        max_storage: Some(ui11.usri11_max_storage),
+        num_logons: Some(ui11.usri11_num_logons),
+        logon_server: pwstr_to_string(ui11.usri11_logon_server),
+        country_code: Some(ui11.usri11_country_code),
     })
 }
 
@@ -165,14 +150,11 @@ fn query_user_details(servername: Option<&str>, username: &str) -> Result<UserIn
         full_name: pwstr_to_string(ui10.usri10_full_name),
         comment: pwstr_to_string(ui10.usri10_comment),
         usr_comment: pwstr_to_string(ui10.usri10_usr_comment),
-        flags: None,
         password_age: None,
         privileges: None,
         home_dir: None,
-        script_path: None,
         last_logon: None,
         last_logoff: None,
-        acct_expires: None,
         workstations: None,
         max_storage: None,
         num_logons: None,
@@ -205,26 +187,17 @@ fn print_detail(user_info: &UserInfo) {
     if let Some(password_age) = &user_info.password_age {
         println!("Password age: {password_age} days");
     }
-    if let Some(flags) = &user_info.flags {
-        println!("Flags: {}", flags.join(", "));
-    }
     if let Some(privileges) = &user_info.privileges {
         println!("Privilege level: {privileges}");
     }
     if let Some(home_dir) = &user_info.home_dir {
         println!("Home directory: {home_dir}");
     }
-    if let Some(script_path) = &user_info.script_path {
-        println!("Script path: {script_path}");
-    }
     if let Some(last_logon) = &user_info.last_logon {
         println!("Last logon: {last_logon}");
     }
     if let Some(last_logoff) = &user_info.last_logoff {
         println!("Last logoff: {last_logoff}");
-    }
-    if let Some(acct_expires) = &user_info.acct_expires {
-        println!("Account expires: {acct_expires}");
     }
     if let Some(workstations) = &user_info.workstations {
         println!("Workstations: {workstations}");
@@ -254,14 +227,11 @@ fn build_user_json(
         full_name: user_info.full_name.clone(),
         comment: user_info.comment.clone(),
         user_comment: user_info.usr_comment.clone(),
-        flags: user_info.flags.clone(),
         password_age: user_info.password_age,
         privileges: user_info.privileges.clone(),
         home_dir: user_info.home_dir.clone(),
-        script_path: user_info.script_path.clone(),
         last_logon: user_info.last_logon,
         last_logoff: user_info.last_logoff,
-        acct_expires: user_info.acct_expires,
         workstations: user_info.workstations.clone(),
         max_storage: user_info.max_storage,
         num_logons: user_info.num_logons,
@@ -342,14 +312,11 @@ fn main() -> Result<()> {
             full_name: None,
             comment: None,
             usr_comment: None,
-            flags: None,
             password_age: None,
             privileges: None,
             home_dir: None,
-            script_path: None,
             last_logon: None,
             last_logoff: None,
-            acct_expires: None,
             workstations: None,
             max_storage: None,
             num_logons: None,
@@ -386,10 +353,7 @@ fn main() -> Result<()> {
     // Output handling
     if cli.json {
         // Build JSON according to the information we have:
-        // - If we fetched level2, use the existing USER_INFO_2 builder (detailed).
-        // - If we fetched level10 (or minimal), use the level10 builder.
         let json = if let Some(user_info) = user_info_opt.as_ref() {
-            // include_detail true because level2 is the extended details
             build_user_json(user_info, groups_result.as_ref(), cli.groups)
         } else {
             // print the minimal object
@@ -398,14 +362,11 @@ fn main() -> Result<()> {
                 full_name: None,
                 comment: None,
                 user_comment: None,
-                flags: None,
                 password_age: None,
                 privileges: None,
                 home_dir: None,
-                script_path: None,
                 last_logon: None,
                 last_logoff: None,
-                acct_expires: None,
                 workstations: None,
                 max_storage: None,
                 num_logons: None,
@@ -606,13 +567,10 @@ mod tests {
             comment: Some("A comment".into()),
             usr_comment: Some("A user comment".into()),
             password_age: None,
-            flags: None,
             privileges: None,
             home_dir: None,
-            script_path: None,
             last_logon: None,
             last_logoff: None,
-            acct_expires: None,
             workstations: None,
             max_storage: None,
             num_logons: None,
@@ -637,17 +595,11 @@ mod tests {
             full_name: Some("Administrator".into()),
             comment: Some("Built-in account".into()),
             usr_comment: Some("System admin".into()),
-            flags: Some(vec![
-                "Normal account".to_string(),
-                "Password does not expire".to_string(),
-            ]),
             password_age: Some(0),
             privileges: Some("Administrator".into()),
             home_dir: Some("C:\\Users\\admin".into()),
-            script_path: Some("logon.bat".into()),
             last_logon: Some(3),
             last_logoff: Some(2),
-            acct_expires: Some(1),
             workstations: Some("All".into()),
             max_storage: Some(0),
             num_logons: Some(42),
@@ -669,10 +621,8 @@ mod tests {
         assert_eq!(json.user_comment, Some("System admin".to_string()));
         assert_eq!(json.privileges, Some("Administrator".to_string()));
         assert_eq!(json.home_dir, Some("C:\\Users\\admin".to_string()));
-        assert_eq!(json.script_path, Some("logon.bat".to_string()));
         assert_eq!(json.last_logon, Some(3));
         assert_eq!(json.last_logoff, Some(2));
-        assert_eq!(json.acct_expires, Some(1));
         assert_eq!(json.workstations, Some("All".to_string()));
         assert_eq!(json.max_storage, Some(0));
         assert_eq!(json.num_logons, Some(42));
@@ -688,14 +638,11 @@ mod tests {
             full_name: Some("Test User".to_string()),
             comment: Some("A comment".to_string()),
             usr_comment: Some("User comment".to_string()),
-            flags: Some(vec!["Script".to_string()]),
             password_age: Some(30),
             privileges: Some("User".to_string()),
             home_dir: Some("C:\\home".to_string()),
-            script_path: Some("script.bat".to_string()),
             last_logon: Some(0),
             last_logoff: Some(0),
-            acct_expires: Some(0),
             workstations: Some("WS1".to_string()),
             max_storage: Some(0),
             num_logons: Some(5),
@@ -712,10 +659,8 @@ mod tests {
         assert_eq!(json.user_comment, Some("User comment".to_string()));
         assert_eq!(json.privileges, Some("User".to_string()));
         assert_eq!(json.home_dir, Some("C:\\home".to_string()));
-        assert_eq!(json.script_path, Some("script.bat".to_string()));
         assert_eq!(json.last_logon, Some(0));
         assert_eq!(json.last_logoff, Some(0));
-        assert_eq!(json.acct_expires, Some(0));
         assert_eq!(json.workstations, Some("WS1".to_string()));
         assert_eq!(json.max_storage, Some(0));
         assert_eq!(json.num_logons, Some(5));
@@ -731,14 +676,11 @@ mod tests {
             full_name: Some("".to_string()),
             comment: Some("".to_string()),
             usr_comment: Some("".to_string()),
-            flags: Some(vec![]),
             password_age: Some(0),
             privileges: Some("User".to_string()),
             home_dir: Some("".to_string()),
-            script_path: Some("".to_string()),
             last_logon: Some(0),
             last_logoff: Some(0),
-            acct_expires: Some(0),
             workstations: Some("".to_string()),
             max_storage: Some(0),
             num_logons: Some(0),
@@ -753,10 +695,8 @@ mod tests {
         assert_eq!(json.comment, Some("".to_string()));
         assert_eq!(json.user_comment, Some("".to_string()));
         assert_eq!(json.home_dir, Some("".to_string()));
-        assert_eq!(json.script_path, Some("".to_string()));
         assert_eq!(json.last_logon, Some(0));
         assert_eq!(json.last_logoff, Some(0));
-        assert_eq!(json.acct_expires, Some(0));
         assert_eq!(json.workstations, Some("".to_string()));
         assert_eq!(json.max_storage, Some(0));
         assert_eq!(json.logon_server, Some("".to_string()));
@@ -771,14 +711,11 @@ mod tests {
             full_name: Some("  Name With Spaces  ".to_string()),
             comment: Some("  comment  ".to_string()),
             usr_comment: Some("  ".to_string()),
-            flags: Some(vec![]),
             password_age: Some(0),
             privileges: Some("User".to_string()),
             home_dir: Some("  C:\\path  ".to_string()),
-            script_path: Some("".to_string()),
             last_logon: Some(0),
             last_logoff: Some(0),
-            acct_expires: Some(0),
             workstations: Some("".to_string()),
             max_storage: Some(0),
             num_logons: Some(0),
@@ -802,14 +739,11 @@ mod tests {
             full_name: Some("Test".to_string()),
             comment: Some("".to_string()),
             usr_comment: Some("".to_string()),
-            flags: Some(vec![]),
             password_age: Some(0),
             privileges: Some("User".to_string()),
             home_dir: Some("".to_string()),
-            script_path: Some("".to_string()),
             last_logon: Some(0),
             last_logoff: Some(0),
-            acct_expires: Some(0),
             workstations: Some("".to_string()),
             max_storage: Some(0),
             num_logons: Some(0),
@@ -828,14 +762,11 @@ mod tests {
             full_name: Some("Test".to_string()),
             comment: Some("".to_string()),
             usr_comment: Some("".to_string()),
-            flags: Some(vec![]),
             password_age: Some(0),
             privileges: Some("User".to_string()),
             home_dir: Some("".to_string()),
-            script_path: Some("".to_string()),
             last_logon: Some(0),
             last_logoff: Some(0),
-            acct_expires: Some(0),
             workstations: Some("".to_string()),
             max_storage: Some(0),
             num_logons: Some(0),
@@ -856,14 +787,11 @@ mod tests {
             full_name: Some("Test User".to_string()),
             comment: Some("Test comment".to_string()),
             usr_comment: Some("User comment".to_string()),
-            flags: Some(vec!["Script".to_string(), "Normal account".to_string()]),
             password_age: Some(10),
             privileges: Some("User".to_string()),
             home_dir: Some("C:\\home\\test".to_string()),
-            script_path: Some("logon.bat".to_string()),
             last_logon: Some(10),
             last_logoff: Some(10),
-            acct_expires: Some(10),
             workstations: Some("WS1,WS2".to_string()),
             max_storage: Some(0),
             num_logons: Some(42),
@@ -881,14 +809,11 @@ mod tests {
             full_name: Some("".to_string()),
             comment: Some("".to_string()),
             usr_comment: Some("".to_string()),
-            flags: Some(vec![]),
             password_age: Some(0),
             privileges: Some("User".to_string()),
             home_dir: Some("".to_string()),
-            script_path: Some("".to_string()),
             last_logon: Some(0),
             last_logoff: Some(0),
-            acct_expires: Some(0),
             workstations: Some("".to_string()),
             max_storage: Some(0),
             num_logons: Some(0),
@@ -906,14 +831,11 @@ mod tests {
             full_name: Some("User, First M. Last (ID: 123)".to_string()),
             comment: Some("Comment with \"quotes\" and 'apostrophes'".to_string()),
             usr_comment: Some("Unicode: café, 日本語".to_string()),
-            flags: Some(vec!["Account disabled".to_string()]),
             password_age: Some(0),
             privileges: Some("User".to_string()),
             home_dir: Some("\\\\server\\share\\user@domain".to_string()),
-            script_path: Some("".to_string()),
             last_logon: Some(0),
             last_logoff: Some(0),
-            acct_expires: Some(0),
             workstations: Some("".to_string()),
             max_storage: Some(0),
             num_logons: Some(0),
