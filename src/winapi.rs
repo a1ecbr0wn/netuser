@@ -222,16 +222,29 @@ pub fn decode_user_flags(flags: u32) -> Option<Vec<String>> {
     if (flags & UF_PARTIAL_SECRETS_ACCOUNT) != 0 {
         out.push("Partial secrets account".to_string());
     }
-    if out.len() > 0 {
+    if !out.is_empty() {
         Some(out)
     } else {
         None
     }
 }
 
+pub fn decode_privileges(
+    priv_val: windows::Win32::NetworkManagement::NetManagement::USER_PRIV,
+) -> &'static str {
+    match priv_val.0 {
+        0 => "Guest",
+        1 => "User",
+        2 => "Administrator",
+        _ => "Unknown",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use windows::Win32::NetworkManagement::NetManagement::USER_PRIV;
+
     #[test]
     fn decode_user_flags_empty() {
         let labels = decode_user_flags(0);
@@ -246,5 +259,14 @@ mod tests {
             .unwrap()
             .iter()
             .any(|s| s.contains("Temporary duplicate account")));
+    }
+
+    #[test]
+    fn decode_privileges_values() {
+        assert_eq!(decode_privileges(USER_PRIV(0)), "Guest");
+        assert_eq!(decode_privileges(USER_PRIV(1)), "User");
+        assert_eq!(decode_privileges(USER_PRIV(2)), "Administrator");
+        // unknown -> Unknown
+        assert_eq!(decode_privileges(USER_PRIV(99)), "Unknown");
     }
 }

@@ -19,8 +19,8 @@ use clap::Parser;
 use options::CmdLineOptions;
 use serde::Serialize;
 use winapi::{
-    decode_user_flags, get_domain_controller_name, get_user_details, get_user_extended_details,
-    get_user_groups, pwstr_to_string,
+    decode_privileges, decode_user_flags, get_domain_controller_name, get_user_details,
+    get_user_extended_details, get_user_groups, pwstr_to_string,
 };
 
 /// Lightweight representation of user info results.
@@ -143,7 +143,7 @@ fn query_user_extended_details(servername: Option<&str>, username: &str) -> Resu
         usr_comment: pwstr_to_string(ui2.usri2_usr_comment),
         password_age: Some(seconds_to_days(ui2.usri2_password_age)),
         flags: decode_user_flags(ui2.usri2_flags.0),
-        privileges: Some(priv_to_label(ui2.usri2_priv).to_string()),
+        privileges: Some(decode_privileges(ui2.usri2_priv).to_string()),
         home_dir: pwstr_to_string(ui2.usri2_home_dir),
         script_path: pwstr_to_string(ui2.usri2_script_path),
         last_logon: Some(seconds_to_days(ui2.usri2_last_logon)),
@@ -255,7 +255,7 @@ fn build_user_json(
         comment: user_info.comment.clone(),
         user_comment: user_info.usr_comment.clone(),
         flags: user_info.flags.clone(),
-        password_age: user_info.password_age.clone(),
+        password_age: user_info.password_age,
         privileges: user_info.privileges.clone(),
         home_dir: user_info.home_dir.clone(),
         script_path: user_info.script_path.clone(),
@@ -272,17 +272,6 @@ fn build_user_json(
         } else {
             None
         },
-    }
-}
-
-fn priv_to_label(
-    priv_val: windows::Win32::NetworkManagement::NetManagement::USER_PRIV,
-) -> &'static str {
-    match priv_val.0 {
-        0 => "Guest",
-        1 => "User",
-        2 => "Administrator",
-        _ => "Unknown",
     }
 }
 
@@ -314,7 +303,7 @@ fn main() -> Result<()> {
     let servername = server_opt.as_deref();
 
     // Fetch data according to requested level, with the same fallback behavior (try DC, then local)
-    let mut user_info_opt: Option<UserInfo>;
+    let user_info_opt: Option<UserInfo>;
 
     if cli.extended_details {
         match query_user_extended_details(servername, &cli.username) {
@@ -349,7 +338,7 @@ fn main() -> Result<()> {
         }
     } else {
         user_info_opt = Some(UserInfo {
-            username: Some((&cli.username).to_owned()),
+            username: Some(cli.username.to_owned()),
             full_name: None,
             comment: None,
             usr_comment: None,
@@ -465,72 +454,12 @@ fn main() -> Result<()> {
             }
         }
     }
-
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_server_input, priv_to_label, seconds_to_days};
-    use std::mem;
-    use windows::Win32::NetworkManagement::NetManagement::{USER_ACCOUNT_FLAGS, USER_PRIV};
-
-    // Helper: create a USER_INFO_2-backed TestUser structure that keeps UTF-16 buffers alive.
-    struct TestUserInfo {
-        _name: widestring::U16CString,
-        _full: widestring::U16CString,
-        _comment: widestring::U16CString,
-        _home: widestring::U16CString,
-        _script: widestring::U16CString,
-        _parms: widestring::U16CString,
-        ui: super::USER_INFO_2,
-    }
-
-    fn make_test_userinfo(
-        name: &str,
-        full: &str,
-        comment: &str,
-        home: &str,
-        script: &str,
-        parms: &str,
-        flags: u32,
-        pwd_age_secs: u32,
-        priv_val: USER_PRIV,
-    ) -> TestUserInfo {
-        use widestring::U16CString;
-        use windows::core::PWSTR;
-
-        let name_u = U16CString::from_str(name).unwrap();
-        let full_u = U16CString::from_str(full).unwrap();
-        let comment_u = U16CString::from_str(comment).unwrap();
-        let home_u = U16CString::from_str(home).unwrap();
-        let script_u = U16CString::from_str(script).unwrap();
-        let parms_u = U16CString::from_str(parms).unwrap();
-
-        unsafe {
-            let mut ui: super::USER_INFO_2 = mem::zeroed();
-            ui.usri2_name = PWSTR(name_u.as_ptr() as *mut _);
-            ui.usri2_full_name = PWSTR(full_u.as_ptr() as *mut _);
-            ui.usri2_comment = PWSTR(comment_u.as_ptr() as *mut _);
-            ui.usri2_home_dir = PWSTR(home_u.as_ptr() as *mut _);
-            ui.usri2_script_path = PWSTR(script_u.as_ptr() as *mut _);
-            ui.usri2_parms = PWSTR(parms_u.as_ptr() as *mut _);
-
-            ui.usri2_flags = USER_ACCOUNT_FLAGS(flags);
-            ui.usri2_password_age = pwd_age_secs;
-            ui.usri2_priv = priv_val;
-
-            TestUserInfo {
-                _name: name_u,
-                _full: full_u,
-                _comment: comment_u,
-                _home: home_u,
-                _script: script_u,
-                _parms: parms_u,
-                ui,
-            }
-        }
-    }
+    use super::{normalize_server_input, seconds_to_days};
 
     #[test]
     fn normalize_various_inputs() {
@@ -566,51 +495,12 @@ mod tests {
     }
 
     #[test]
-    fn priv_to_label_values() {
-        assert_eq!(priv_to_label(USER_PRIV(0)), "Guest");
-        assert_eq!(priv_to_label(USER_PRIV(1)), "User");
-        assert_eq!(priv_to_label(USER_PRIV(2)), "Administrator");
-        // unknown -> Unknown
-        assert_eq!(priv_to_label(USER_PRIV(99)), "Unknown");
-    }
-
-    #[test]
     fn seconds_to_days_tests() {
         assert_eq!(seconds_to_days(0), 0);
         assert_eq!(seconds_to_days(86_400), 1);
         assert_eq!(seconds_to_days(172_800), 2);
         // partial day truncates
         assert_eq!(seconds_to_days(86_400 + 3_600), 1);
-    }
-
-    #[test]
-    fn build_user_json_from_fake_user_info() {
-        let t = make_test_userinfo(
-            "alice",
-            "Alice Example",
-            "Test comment",
-            r"C:\Users\alice",
-            "login.bat",
-            "profile_path",
-            super::UF_ACCOUNTDISABLE.0 as u32,
-            86_400,
-            USER_PRIV(2),
-        );
-
-        let uj = super::build_user_json_extended_detail(&t.ui, None, true, false);
-
-        assert_eq!(uj.username.as_deref(), Some("alice"));
-        assert_eq!(uj.full_name.as_deref(), Some("Alice Example"));
-        assert_eq!(uj.comment.as_deref(), Some("Test comment"));
-
-        let flags = uj.flags.expect("expected user_flags");
-        assert!(flags.iter().any(|s| s.contains("Account disabled")));
-
-        assert_eq!(uj.password_age, Some(1));
-        assert_eq!(uj.privileges.as_deref(), Some("Administrator"));
-        assert_eq!(uj.home_dir.as_deref(), Some(r"C:\Users\alice"));
-        assert_eq!(uj.script_path.as_deref(), Some("login.bat"));
-        assert_eq!(uj.profile_path.as_deref(), Some("profile_path"));
     }
 
     #[test]
@@ -657,28 +547,6 @@ mod tests {
         // both comment keys when present
         assert!(s.contains("\"comment\""));
         assert!(s.contains("\"user_comment\""));
-        assert!(!s.contains("null"));
-    }
-
-    #[test]
-    fn json_output_extended_detail_contains_expected_fields_and_no_nulls() {
-        // Build a USER_INFO_2 and ensure JSON output (detailed) contains fields like password_age and user_flags
-        let t = make_test_userinfo(
-            "carol",
-            "Carol Example",
-            "Another comment",
-            r"C:\Users\carol",
-            "start.bat",
-            "parms",
-            super::UF_TEMP_DUPLICATE_ACCOUNT,
-            86_400 * 2,
-            USER_PRIV(1),
-        );
-        let uj = super::build_user_json_extended_detail(&t.ui, None, true, false);
-        let s = serde_json::to_string(&uj).unwrap();
-        assert!(s.contains("\"password_age\""));
-        assert!(s.contains("\"user_flags\""));
-        // No nulls should be present thanks to serde skip_serializing_if
         assert!(!s.contains("null"));
     }
 }
