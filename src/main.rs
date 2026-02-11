@@ -454,12 +454,13 @@ fn main() -> Result<()> {
             }
         }
     }
+
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_server_input, seconds_to_days};
+    use super::{build_user_json, normalize_server_input, print_detail, seconds_to_days, UserInfo};
 
     #[test]
     fn normalize_various_inputs() {
@@ -495,6 +496,18 @@ mod tests {
     }
 
     #[test]
+    fn normalize_preserves_case() {
+        assert_eq!(
+            normalize_server_input(Some("DC01")),
+            Some(String::from("\\\\DC01"))
+        );
+        assert_eq!(
+            normalize_server_input(Some("\\\\\\DC01")),
+            Some(String::from("\\\\\\DC01"))
+        );
+    }
+
+    #[test]
     fn seconds_to_days_tests() {
         assert_eq!(seconds_to_days(0), 0);
         assert_eq!(seconds_to_days(86_400), 1);
@@ -504,21 +517,88 @@ mod tests {
     }
 
     #[test]
+    fn seconds_to_days_zero() {
+        assert_eq!(seconds_to_days(0), 0);
+    }
+
+    #[test]
+    fn seconds_to_days_one_day() {
+        assert_eq!(seconds_to_days(86400), 1);
+    }
+
+    #[test]
+    fn seconds_to_days_just_under_one_day() {
+        assert_eq!(seconds_to_days(86399), 0);
+    }
+
+    #[test]
+    fn seconds_to_days_two_days() {
+        assert_eq!(seconds_to_days(172800), 2);
+    }
+
+    #[test]
+    fn seconds_to_days_max_value() {
+        assert_eq!(seconds_to_days(u32::MAX), u32::MAX / 86400);
+    }
+
+    #[test]
+    fn seconds_to_days_just_over_one_day() {
+        assert_eq!(seconds_to_days(86401), 1);
+    }
+
+    #[test]
+    fn seconds_to_days_one_second() {
+        assert_eq!(seconds_to_days(1), 0);
+    }
+
+    #[test]
+    fn seconds_to_days_large_value() {
+        // 365 days worth of seconds
+        assert_eq!(seconds_to_days(365 * 86400), 365);
+    }
+
+    #[test]
     fn cli_short_flags_parse() {
         // Verify short flag parsing for brief and extended details.
         let c: super::CmdLineOptions =
             clap::Parser::try_parse_from(&["netuser", "-d", "alice"]).unwrap();
         assert!(c.details);
         assert!(!c.extended_details);
+        assert_eq!(c.username, "alice".to_string());
 
         let c2: super::CmdLineOptions =
             clap::Parser::try_parse_from(&["netuser", "-e", "alice"]).unwrap();
         assert!(c2.extended_details);
         assert!(!c2.details);
+        assert_eq!(c2.username, "alice".to_string());
+
+        let c3: super::CmdLineOptions =
+            clap::Parser::try_parse_from(&["netuser", "alice", "-s", "domain_controller", "-j"])
+                .unwrap();
+        assert!(c3.json);
+        assert_eq!(c3.server, Some("domain_controller".to_string()));
+        assert_eq!(c3.username, "alice".to_string());
     }
 
     #[test]
-    fn json_output_detail_contains_expected_fields_and_no_nulls() {
+    fn cli_long_flags_parse() {
+        let args = vec![
+            "netuser".to_string(),
+            "alice".to_string(),
+            "--server".to_string(),
+            "domain_controller".to_string(),
+            "--json".to_string(),
+            "--extended-details".to_string(),
+        ];
+        let c: super::CmdLineOptions = clap::Parser::try_parse_from(args).unwrap();
+        assert!(c.json);
+        assert!(c.extended_details);
+        assert_eq!(c.server, Some("domain_controller".to_string()));
+        assert_eq!(c.username, "alice".to_string());
+    }
+
+    #[test]
+    fn json_output_detail_contains_expected_fields_with_nones() {
         // Create a simple UserInfo10 and ensure JSON output contains expected keys and no nulls.
         let info10 = super::UserInfo {
             username: Some("bob".into()),
@@ -548,5 +628,298 @@ mod tests {
         assert!(s.contains("\"comment\""));
         assert!(s.contains("\"user_comment\""));
         assert!(!s.contains("null"));
+    }
+
+    #[test]
+    fn json_output_detail_contains_expected_fields_and_no_nulls() {
+        let user_info = super::UserInfo {
+            username: Some("admin".into()),
+            full_name: Some("Administrator".into()),
+            comment: Some("Built-in account".into()),
+            usr_comment: Some("System admin".into()),
+            flags: Some(vec![
+                "Normal account".to_string(),
+                "Password does not expire".to_string(),
+            ]),
+            password_age: Some(0),
+            privileges: Some("Administrator".into()),
+            home_dir: Some("C:\\Users\\admin".into()),
+            script_path: Some("logon.bat".into()),
+            last_logon: Some(3),
+            last_logoff: Some(2),
+            acct_expires: Some(1),
+            workstations: Some("All".into()),
+            max_storage: Some(0),
+            num_logons: Some(42),
+            logon_server: Some("\\\\DC01".into()),
+            country_code: Some(44),
+        };
+
+        let groups = vec![
+            "Administrators".to_string(),
+            "Users".to_string(),
+            "Remote Desktop Users".to_string(),
+        ];
+
+        let json = build_user_json(&user_info, Some(&groups), true);
+
+        assert_eq!(json.username, Some("admin".to_string()));
+        assert_eq!(json.full_name, Some("Administrator".to_string()));
+        assert_eq!(json.comment, Some("Built-in account".to_string()));
+        assert_eq!(json.user_comment, Some("System admin".to_string()));
+        assert_eq!(json.privileges, Some("Administrator".to_string()));
+        assert_eq!(json.home_dir, Some("C:\\Users\\admin".to_string()));
+        assert_eq!(json.script_path, Some("logon.bat".to_string()));
+        assert_eq!(json.last_logon, Some(3));
+        assert_eq!(json.last_logoff, Some(2));
+        assert_eq!(json.acct_expires, Some(1));
+        assert_eq!(json.workstations, Some("All".to_string()));
+        assert_eq!(json.max_storage, Some(0));
+        assert_eq!(json.num_logons, Some(42));
+        assert_eq!(json.logon_server, Some("\\\\DC01".to_string()));
+        assert_eq!(json.country_code, Some(44));
+        assert_eq!(json.groups, Some(groups));
+    }
+
+    #[test]
+    fn build_user_json_maps_all_fields() {
+        let user_info = UserInfo {
+            username: Some("testuser".to_string()),
+            full_name: Some("Test User".to_string()),
+            comment: Some("A comment".to_string()),
+            usr_comment: Some("User comment".to_string()),
+            flags: Some(vec!["Script".to_string()]),
+            password_age: Some(30),
+            privileges: Some("User".to_string()),
+            home_dir: Some("C:\\home".to_string()),
+            script_path: Some("script.bat".to_string()),
+            last_logon: Some(0),
+            last_logoff: Some(0),
+            acct_expires: Some(0),
+            workstations: Some("WS1".to_string()),
+            max_storage: Some(0),
+            num_logons: Some(5),
+            logon_server: Some("DC1".to_string()),
+            country_code: Some(0),
+        };
+
+        let groups = vec!["Admins".to_string(), "Users".to_string()];
+        let json = build_user_json(&user_info, Some(&groups), true);
+
+        assert_eq!(json.username, Some("testuser".to_string()));
+        assert_eq!(json.full_name, Some("Test User".to_string()));
+        assert_eq!(json.comment, Some("A comment".to_string()));
+        assert_eq!(json.user_comment, Some("User comment".to_string()));
+        assert_eq!(json.privileges, Some("User".to_string()));
+        assert_eq!(json.home_dir, Some("C:\\home".to_string()));
+        assert_eq!(json.script_path, Some("script.bat".to_string()));
+        assert_eq!(json.last_logon, Some(0));
+        assert_eq!(json.last_logoff, Some(0));
+        assert_eq!(json.acct_expires, Some(0));
+        assert_eq!(json.workstations, Some("WS1".to_string()));
+        assert_eq!(json.max_storage, Some(0));
+        assert_eq!(json.num_logons, Some(5));
+        assert_eq!(json.logon_server, Some("DC1".to_string()));
+        assert_eq!(json.country_code, Some(0));
+        assert_eq!(json.groups, Some(groups));
+    }
+
+    #[test]
+    fn build_user_json_empty_optional_fields_become_none() {
+        let user_info = UserInfo {
+            username: Some("testuser".to_string()),
+            full_name: Some("".to_string()),
+            comment: Some("".to_string()),
+            usr_comment: Some("".to_string()),
+            flags: Some(vec![]),
+            password_age: Some(0),
+            privileges: Some("User".to_string()),
+            home_dir: Some("".to_string()),
+            script_path: Some("".to_string()),
+            last_logon: Some(0),
+            last_logoff: Some(0),
+            acct_expires: Some(0),
+            workstations: Some("".to_string()),
+            max_storage: Some(0),
+            num_logons: Some(0),
+            logon_server: Some("".to_string()),
+            country_code: Some(0),
+        };
+
+        let json = build_user_json(&user_info, None, false);
+
+        assert_eq!(json.username, Some("testuser".to_string()));
+        assert_eq!(json.full_name, Some("".to_string()));
+        assert_eq!(json.comment, Some("".to_string()));
+        assert_eq!(json.user_comment, Some("".to_string()));
+        assert_eq!(json.home_dir, Some("".to_string()));
+        assert_eq!(json.script_path, Some("".to_string()));
+        assert_eq!(json.last_logon, Some(0));
+        assert_eq!(json.last_logoff, Some(0));
+        assert_eq!(json.acct_expires, Some(0));
+        assert_eq!(json.workstations, Some("".to_string()));
+        assert_eq!(json.max_storage, Some(0));
+        assert_eq!(json.logon_server, Some("".to_string()));
+        assert_eq!(json.country_code, Some(0));
+        assert_eq!(json.groups, None);
+    }
+
+    #[test]
+    fn build_user_json_preserves_whitespace_in_fields() {
+        let user_info = UserInfo {
+            username: Some("user1".to_string()),
+            full_name: Some("  Name With Spaces  ".to_string()),
+            comment: Some("  comment  ".to_string()),
+            usr_comment: Some("  ".to_string()),
+            flags: Some(vec![]),
+            password_age: Some(0),
+            privileges: Some("User".to_string()),
+            home_dir: Some("  C:\\path  ".to_string()),
+            script_path: Some("".to_string()),
+            last_logon: Some(0),
+            last_logoff: Some(0),
+            acct_expires: Some(0),
+            workstations: Some("".to_string()),
+            max_storage: Some(0),
+            num_logons: Some(0),
+            logon_server: Some("".to_string()),
+            country_code: Some(0),
+        };
+
+        let json = build_user_json(&user_info, None, false);
+
+        // Whitespace-only strings are preserved as-is by build_user_json
+        assert_eq!(json.user_comment, Some("  ".to_string()));
+        // Strings with content plus whitespace are preserved
+        assert_eq!(json.full_name, Some("  Name With Spaces  ".to_string()));
+        assert_eq!(json.comment, Some("  comment  ".to_string()));
+    }
+
+    #[test]
+    fn build_user_json_empty_groups_returns_none() {
+        let user_info = UserInfo {
+            username: Some("user1".to_string()),
+            full_name: Some("Test".to_string()),
+            comment: Some("".to_string()),
+            usr_comment: Some("".to_string()),
+            flags: Some(vec![]),
+            password_age: Some(0),
+            privileges: Some("User".to_string()),
+            home_dir: Some("".to_string()),
+            script_path: Some("".to_string()),
+            last_logon: Some(0),
+            last_logoff: Some(0),
+            acct_expires: Some(0),
+            workstations: Some("".to_string()),
+            max_storage: Some(0),
+            num_logons: Some(0),
+            logon_server: Some("".to_string()),
+            country_code: Some(0),
+        };
+
+        let json = build_user_json(&user_info, None, false);
+        assert_eq!(json.groups, None);
+    }
+
+    #[test]
+    fn build_user_json_single_group() {
+        let user_info = UserInfo {
+            username: Some("user1".to_string()),
+            full_name: Some("Test".to_string()),
+            comment: Some("".to_string()),
+            usr_comment: Some("".to_string()),
+            flags: Some(vec![]),
+            password_age: Some(0),
+            privileges: Some("User".to_string()),
+            home_dir: Some("".to_string()),
+            script_path: Some("".to_string()),
+            last_logon: Some(0),
+            last_logoff: Some(0),
+            acct_expires: Some(0),
+            workstations: Some("".to_string()),
+            max_storage: Some(0),
+            num_logons: Some(0),
+            logon_server: Some("".to_string()),
+            country_code: Some(0),
+        };
+
+        let groups = vec!["Developers".to_string()];
+        let json = build_user_json(&user_info, Some(&groups), true);
+        assert_eq!(json.groups, Some(groups));
+    }
+
+    #[test]
+    fn print_detail_does_not_panic() {
+        // Smoke test: ensure print_detail handles typical user info without panicking
+        let user_info = UserInfo {
+            username: Some("test".to_string()),
+            full_name: Some("Test User".to_string()),
+            comment: Some("Test comment".to_string()),
+            usr_comment: Some("User comment".to_string()),
+            flags: Some(vec!["Script".to_string(), "Normal account".to_string()]),
+            password_age: Some(10),
+            privileges: Some("User".to_string()),
+            home_dir: Some("C:\\home\\test".to_string()),
+            script_path: Some("logon.bat".to_string()),
+            last_logon: Some(10),
+            last_logoff: Some(10),
+            acct_expires: Some(10),
+            workstations: Some("WS1,WS2".to_string()),
+            max_storage: Some(0),
+            num_logons: Some(42),
+            logon_server: Some("\\\\DC01".to_string()),
+            country_code: Some(0),
+        };
+        print_detail(&user_info);
+    }
+
+    #[test]
+    fn print_detail_empty_optional_fields() {
+        // Smoke test with minimal fields
+        let user_info = UserInfo {
+            username: Some("minimal".to_string()),
+            full_name: Some("".to_string()),
+            comment: Some("".to_string()),
+            usr_comment: Some("".to_string()),
+            flags: Some(vec![]),
+            password_age: Some(0),
+            privileges: Some("User".to_string()),
+            home_dir: Some("".to_string()),
+            script_path: Some("".to_string()),
+            last_logon: Some(0),
+            last_logoff: Some(0),
+            acct_expires: Some(0),
+            workstations: Some("".to_string()),
+            max_storage: Some(0),
+            num_logons: Some(0),
+            logon_server: Some("".to_string()),
+            country_code: Some(0),
+        };
+        print_detail(&user_info);
+    }
+
+    #[test]
+    fn print_detail_special_characters() {
+        // Smoke test with special characters in fields
+        let user_info = UserInfo {
+            username: Some("user@domain".to_string()),
+            full_name: Some("User, First M. Last (ID: 123)".to_string()),
+            comment: Some("Comment with \"quotes\" and 'apostrophes'".to_string()),
+            usr_comment: Some("Unicode: café, 日本語".to_string()),
+            flags: Some(vec!["Account disabled".to_string()]),
+            password_age: Some(0),
+            privileges: Some("User".to_string()),
+            home_dir: Some("\\\\server\\share\\user@domain".to_string()),
+            script_path: Some("".to_string()),
+            last_logon: Some(0),
+            last_logoff: Some(0),
+            acct_expires: Some(0),
+            workstations: Some("".to_string()),
+            max_storage: Some(0),
+            num_logons: Some(0),
+            logon_server: Some("".to_string()),
+            country_code: Some(0),
+        };
+        print_detail(&user_info);
     }
 }

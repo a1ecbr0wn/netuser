@@ -243,7 +243,12 @@ pub fn decode_privileges(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use windows::Win32::NetworkManagement::NetManagement::USER_PRIV;
+    use windows::Win32::NetworkManagement::NetManagement::{
+        UF_ACCOUNTDISABLE, UF_DONT_EXPIRE_PASSWD, UF_DONT_REQUIRE_PREAUTH, UF_HOMEDIR_REQUIRED,
+        UF_LOCKOUT, UF_NORMAL_ACCOUNT, UF_NOT_DELEGATED, UF_PASSWD_CANT_CHANGE, UF_PASSWD_NOTREQD,
+        UF_SCRIPT, UF_SMARTCARD_REQUIRED, UF_TRUSTED_FOR_DELEGATION, UF_USE_DES_KEY_ONLY,
+        USER_PRIV,
+    };
 
     #[test]
     fn decode_user_flags_empty() {
@@ -262,11 +267,134 @@ mod tests {
     }
 
     #[test]
-    fn decode_privileges_values() {
+    fn decode_user_flags_script() {
+        let labels = decode_user_flags(UF_SCRIPT.0).unwrap();
+        assert!(labels.iter().any(|s| s == "Script"));
+        assert_eq!(labels.len(), 1);
+    }
+
+    #[test]
+    fn decode_user_flags_account_disabled() {
+        let labels = decode_user_flags(UF_ACCOUNTDISABLE.0).unwrap();
+        assert!(labels.iter().any(|s| s == "Account disabled"));
+        assert_eq!(labels.len(), 1);
+    }
+
+    #[test]
+    fn decode_user_flags_home_dir_required() {
+        let labels = decode_user_flags(UF_HOMEDIR_REQUIRED.0).unwrap();
+        assert!(labels.iter().any(|s| s == "Home directory required"));
+    }
+
+    #[test]
+    fn decode_user_flags_lockout() {
+        let labels = decode_user_flags(UF_LOCKOUT.0).unwrap();
+        assert!(labels.iter().any(|s| s == "Locked out"));
+    }
+
+    #[test]
+    fn decode_user_flags_password_not_required() {
+        let labels = decode_user_flags(UF_PASSWD_NOTREQD.0).unwrap();
+        assert!(labels.iter().any(|s| s == "Password not required"));
+    }
+
+    #[test]
+    fn decode_user_flags_password_cant_change() {
+        let labels = decode_user_flags(UF_PASSWD_CANT_CHANGE.0).unwrap();
+        assert!(labels.iter().any(|s| s == "Cannot change password"));
+    }
+
+    #[test]
+    fn decode_user_flags_smartcard_required() {
+        let labels = decode_user_flags(UF_SMARTCARD_REQUIRED.0).unwrap();
+        assert!(labels.iter().any(|s| s == "Smartcard required"));
+    }
+
+    #[test]
+    fn decode_user_flags_trusted_for_delegation() {
+        let labels = decode_user_flags(UF_TRUSTED_FOR_DELEGATION.0).unwrap();
+        assert!(labels.iter().any(|s| s == "Trusted for delegation"));
+    }
+
+    #[test]
+    fn decode_user_flags_not_delegated() {
+        let labels = decode_user_flags(UF_NOT_DELEGATED.0).unwrap();
+        assert!(labels.iter().any(|s| s == "Not delegated"));
+    }
+
+    #[test]
+    fn decode_user_flags_use_des_key_only() {
+        let labels = decode_user_flags(UF_USE_DES_KEY_ONLY.0).unwrap();
+        assert!(labels.iter().any(|s| s == "Use DES key only"));
+    }
+
+    #[test]
+    fn decode_user_flags_dont_require_preauth() {
+        let labels = decode_user_flags(UF_DONT_REQUIRE_PREAUTH.0).unwrap();
+        assert!(labels.iter().any(|s| s == "Does not require preauth"));
+    }
+
+    #[test]
+    fn decode_user_flags_multiple() {
+        let combined = UF_SCRIPT.0 | UF_ACCOUNTDISABLE.0 | UF_NORMAL_ACCOUNT;
+        let labels = decode_user_flags(combined).unwrap();
+        assert!(labels.iter().any(|s| s == "Script"));
+        assert!(labels.iter().any(|s| s == "Account disabled"));
+        assert!(labels.iter().any(|s| s == "Normal account"));
+        assert_eq!(labels.len(), 3);
+    }
+
+    #[test]
+    fn decode_user_flags_lockout_and_password_expiry() {
+        let combined = UF_LOCKOUT.0 | UF_DONT_EXPIRE_PASSWD.0;
+        let labels = decode_user_flags(combined).unwrap();
+        assert!(labels.iter().any(|s| s == "Locked out"));
+        assert!(labels.iter().any(|s| s == "Password does not expire"));
+        assert_eq!(labels.len(), 2);
+    }
+
+    #[test]
+    fn decode_user_flags_all_password_flags() {
+        let combined = UF_PASSWD_NOTREQD.0 | UF_PASSWD_CANT_CHANGE.0 | UF_DONT_EXPIRE_PASSWD.0;
+        let labels = decode_user_flags(combined).unwrap();
+        assert!(labels.iter().any(|s| s == "Password not required"));
+        assert!(labels.iter().any(|s| s == "Cannot change password"));
+        assert!(labels.iter().any(|s| s == "Password does not expire"));
+        assert_eq!(labels.len(), 3);
+    }
+
+    #[test]
+    fn decode_user_flags_trust_accounts() {
+        let combined =
+            UF_INTERDOMAIN_TRUST_ACCOUNT | UF_WORKSTATION_TRUST_ACCOUNT | UF_SERVER_TRUST_ACCOUNT;
+        let labels = decode_user_flags(combined).unwrap();
+        assert!(labels.iter().any(|s| s == "Interdomain trust account"));
+        assert!(labels.iter().any(|s| s == "Workstation trust account"));
+        assert!(labels.iter().any(|s| s == "Server trust account"));
+    }
+
+    #[test]
+    fn decode_privileges_guest() {
         assert_eq!(decode_privileges(USER_PRIV(0)), "Guest");
+    }
+
+    #[test]
+    fn decode_privileges_user() {
         assert_eq!(decode_privileges(USER_PRIV(1)), "User");
+    }
+
+    #[test]
+    fn decode_privileges_administrator() {
         assert_eq!(decode_privileges(USER_PRIV(2)), "Administrator");
-        // unknown -> Unknown
+    }
+
+    #[test]
+    fn decode_privileges_unknown() {
         assert_eq!(decode_privileges(USER_PRIV(99)), "Unknown");
+    }
+
+    #[test]
+    fn decode_privileges_negative_unknown() {
+        assert_eq!(decode_privileges(USER_PRIV(u32::MAX)), "Unknown");
     }
 }
