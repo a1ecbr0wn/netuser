@@ -1,12 +1,11 @@
 //! netuser - A better `net user <name> /domain` for looking up users on my windows domain
 //!
 //! Features:
-//! - CLI via `clap`
-//! - Uses `windows` crate to call `NetGetDCName`, `NetUserGetInfo`, `NetUserGetGroups`
 //! - Default output is the user's full name (or username if missing)
 //! - `-d/--detail` prints basic user info fields
 //! - `-e/--extended-details` prints all user info fields
 //! - `-g/--groups` prints group membership
+//! - `-r/--reverse` performs a reverse lookup to find users by full name, username, or comment
 //! - `-j/--json` outputs requested details in JSON (respects other flags)
 
 #![allow(non_snake_case)]
@@ -16,11 +15,12 @@ mod winapi;
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use comfy_table::Table;
 use options::CmdLineOptions;
 use serde::Serialize;
 use winapi::{
-    decode_privileges, get_domain_controller_name, get_user_details, get_user_extended_details,
-    get_user_groups, pwstr_to_string,
+    decode_privileges, enumerate_users, get_domain_controller_name, get_user_details,
+    get_user_extended_details, get_user_groups, pwstr_to_string,
 };
 
 /// Lightweight representation of user info results.
@@ -89,6 +89,19 @@ struct UserJson {
     // Only populated when --groups is provided
     #[serde(skip_serializing_if = "Option::is_none")]
     groups: Option<Vec<String>>,
+}
+
+#[derive(Serialize)]
+struct ReverseSearchResult {
+    username: String,
+    full_name: String,
+    comment: String,
+}
+
+#[derive(Serialize)]
+struct ReverseSearchResults {
+    results: Vec<ReverseSearchResult>,
+    total: usize,
 }
 
 // Functions to interpret the data received about users
@@ -250,6 +263,43 @@ fn seconds_to_days(seconds: u32) -> u32 {
     (seconds) / 86_400
 }
 
+/// Display enumerated users in a formatted table.
+fn display_users_table(users: &[winapi::EnumeratedUser]) {
+    if users.is_empty() {
+        println!("No users found matching the search criteria.");
+        return;
+    }
+
+    let mut table = Table::new();
+    table.set_header(vec!["Username", "Full Name", "Comment"]);
+
+    for user in users {
+        table.add_row(vec![&user.username, &user.full_name, &user.comment]);
+    }
+
+    println!("{table}");
+    println!("\nTotal: {} user(s) found", users.len());
+}
+
+/// Display enumerated users as JSON.
+fn display_users_json(users: &[winapi::EnumeratedUser]) -> Result<()> {
+    let results = ReverseSearchResults {
+        results: users
+            .iter()
+            .map(|u| ReverseSearchResult {
+                username: u.username.clone(),
+                full_name: u.full_name.clone(),
+                comment: u.comment.clone(),
+            })
+            .collect(),
+        total: users.len(),
+    };
+
+    let json = serde_json::to_string_pretty(&results)?;
+    println!("{json}");
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let cli = CmdLineOptions::parse();
 
@@ -272,96 +322,67 @@ fn main() -> Result<()> {
     // Pass an Option<&str> to existing query functions
     let servername = server_opt.as_deref();
 
-    // Fetch data according to requested level, with the same fallback behavior (try DC, then local)
-    let user_info_opt: Option<UserInfo>;
-
-    if cli.extended_details {
-        match query_user_extended_details(servername, &cli.username) {
-            Ok(u10) => user_info_opt = Some(u10),
-            Err(e) => {
+    // Handle reverse lookup mode
+    if cli.reverse {
+        // Enumerate all users matching the search string
+        let users = enumerate_users(servername, &cli.username)
+            .or_else(|e| {
                 if servername.is_some() {
-                    eprintln!("warning: failed to query user info using DC ({e}). Falling back to local queries.");
-                    user_info_opt = Some(
-                        query_user_extended_details(None, &cli.username).with_context(|| {
-                            "failed to query user info (fallback) - ensure you have privileges"
-                        })?,
-                    );
+                    eprintln!("warning: failed to enumerate users on DC ({e}). Falling back to local queries.");
+                    enumerate_users(None, &cli.username)
                 } else {
-                    return Err(e).context("failed to query user info");
+                    Err(e)
                 }
-            }
-        }
-    } else if cli.details {
-        match query_user_details(servername, &cli.username) {
-            Ok(u10) => user_info_opt = Some(u10),
-            Err(e) => {
-                if servername.is_some() {
-                    eprintln!("warning: failed to query user info using DC ({e}). Falling back to local queries.");
-                    user_info_opt =
-                        Some(query_user_details(None, &cli.username).with_context(|| {
-                            "failed to query user info (fallback) - ensure you have privileges"
-                        })?);
-                } else {
-                    return Err(e).context("failed to query user info");
-                }
-            }
-        }
-    } else {
-        user_info_opt = Some(UserInfo {
-            username: Some(cli.username.to_owned()),
-            full_name: None,
-            comment: None,
-            usr_comment: None,
-            password_age: None,
-            privileges: None,
-            home_dir: None,
-            last_logon: None,
-            last_logoff: None,
-            workstations: None,
-            max_storage: None,
-            num_logons: None,
-            logon_server: None,
-            country_code: None,
-        })
-    };
+            })
+            .context("failed to enumerate users - ensure you have privileges")?;
 
-    // Only query groups when the user explicitly requested --groups.
-    // Previously groups were queried when --json was set; now we restrict to -g/--groups only.
-    let groups_result = if cli.groups {
-        match query_user_groups(servername, &cli.username) {
-            Ok(g) => Some(g),
-            Err(e) => {
-                if servername.is_some() {
-                    eprintln!("warning: failed to query groups using DC ({e}). Falling back to local queries.");
-                    match query_user_groups(None, &cli.username) {
-                        Ok(g2) => Some(g2),
-                        Err(e2) => {
-                            eprintln!("failed to query groups (fallback): {e2}");
-                            None
-                        }
-                    }
-                } else {
-                    eprintln!("failed to query groups: {e}");
-                    None
-                }
-            }
-        }
-    } else {
-        None
-    };
-
-    // Output handling
-    if cli.json {
-        // Build JSON according to the information we have:
-        let json = if let Some(user_info) = user_info_opt.as_ref() {
-            build_user_json(user_info, groups_result.as_ref(), cli.groups)
+        // Display results based on output format
+        if cli.json {
+            display_users_json(&users)?;
         } else {
-            // print the minimal object
-            UserJson {
-                username: Some(cli.username.clone()),
+            display_users_table(&users);
+        }
+    } else {
+        // Fetch data according to requested level, with the same fallback behavior (try DC, then local)
+        let user_info_opt: Option<UserInfo>;
+
+        if cli.extended_details {
+            match query_user_extended_details(servername, &cli.username) {
+                Ok(user) => user_info_opt = Some(user),
+                Err(e) => {
+                    if servername.is_some() {
+                        eprintln!("warning: failed to query user info using DC ({e}). Falling back to local queries.");
+                        user_info_opt = Some(
+                            query_user_extended_details(None, &cli.username).with_context(|| {
+                                "failed to query user info (fallback) - ensure you have privileges"
+                            })?,
+                        );
+                    } else {
+                        return Err(e).context("failed to query user info");
+                    }
+                }
+            }
+        } else if cli.details {
+            match query_user_details(servername, &cli.username) {
+                Ok(user) => user_info_opt = Some(user),
+                Err(e) => {
+                    if servername.is_some() {
+                        eprintln!("warning: failed to query user info using DC ({e}). Falling back to local queries.");
+                        user_info_opt =
+                            Some(query_user_details(None, &cli.username).with_context(|| {
+                                "failed to query user info (fallback) - ensure you have privileges"
+                            })?);
+                    } else {
+                        return Err(e).context("failed to query user info");
+                    }
+                }
+            }
+        } else {
+            user_info_opt = Some(UserInfo {
+                username: Some(cli.username.to_owned()),
                 full_name: None,
                 comment: None,
-                user_comment: None,
+                usr_comment: None,
                 password_age: None,
                 privileges: None,
                 home_dir: None,
@@ -372,46 +393,97 @@ fn main() -> Result<()> {
                 num_logons: None,
                 logon_server: None,
                 country_code: None,
-                groups: None,
-            }
+            })
         };
-        let j = serde_json::to_string_pretty(&json)?;
-        println!("{j}");
-        return Ok(());
-    }
 
-    // Default behavior: if no detail/groups flags, print only the full name (use level 10)
-    if !cli.details && !cli.extended_details && !cli.groups {
-        // No detail flags requested and no groups: show only full name using level10 when available.
-        if let Some(user_info) = user_info_opt.as_ref() {
-            if let Some(full_name) = &user_info.full_name {
-                println!("{full_name}");
-            } else if let Some(name) = &user_info.username {
-                println!("{name}");
-            } else {
-                println!("{}", cli.username.to_owned());
+        // Only query groups when the user explicitly requested --groups.
+        // Previously groups were queried when --json was set; now we restrict to -g/--groups only.
+        let groups_result = if cli.groups {
+            match query_user_groups(servername, &cli.username) {
+                Ok(g) => Some(g),
+                Err(e) => {
+                    if servername.is_some() {
+                        eprintln!("warning: failed to query groups using DC ({e}). Falling back to local queries.");
+                        match query_user_groups(None, &cli.username) {
+                            Ok(g2) => Some(g2),
+                            Err(e2) => {
+                                eprintln!("failed to query groups (fallback): {e2}");
+                                None
+                            }
+                        }
+                    } else {
+                        eprintln!("failed to query groups: {e}");
+                        None
+                    }
+                }
             }
         } else {
-            // As a very conservative fallback
-            println!("{}", &cli.username);
+            None
+        };
+
+        // Output handling
+        if cli.json {
+            // Build JSON according to the information we have:
+            let json = if let Some(user_info) = user_info_opt.as_ref() {
+                build_user_json(user_info, groups_result.as_ref(), cli.groups)
+            } else {
+                // print the minimal object
+                UserJson {
+                    username: Some(cli.username.clone()),
+                    full_name: None,
+                    comment: None,
+                    user_comment: None,
+                    password_age: None,
+                    privileges: None,
+                    home_dir: None,
+                    last_logon: None,
+                    last_logoff: None,
+                    workstations: None,
+                    max_storage: None,
+                    num_logons: None,
+                    logon_server: None,
+                    country_code: None,
+                    groups: None,
+                }
+            };
+            let j = serde_json::to_string_pretty(&json)?;
+            println!("{j}");
+            return Ok(());
         }
-        return Ok(());
-    } else {
-        // If detailed, print all fields
-        if cli.details || cli.extended_details {
+
+        // Default behavior: if no detail/groups flags, print only the full name (use level 10)
+        if !cli.details && !cli.extended_details && !cli.groups {
+            // No detail flags requested and no groups: show only full name using level10 when available.
             if let Some(user_info) = user_info_opt.as_ref() {
-                print_detail(user_info);
-            }
-        }
-        // If groups requested, print them
-        if cli.groups {
-            if let Some(gs) = groups_result {
-                println!("Groups:");
-                for g in gs {
-                    println!(" - {g}");
+                if let Some(full_name) = &user_info.full_name {
+                    println!("{full_name}");
+                } else if let Some(name) = &user_info.username {
+                    println!("{name}");
+                } else {
+                    println!("{}", cli.username.to_owned());
                 }
             } else {
-                println!("Groups: (none or failed to enumerate)");
+                // As a very conservative fallback
+                println!("{}", &cli.username);
+            }
+            return Ok(());
+        } else {
+            // If detailed, print all fields
+            if cli.details || cli.extended_details {
+                if let Some(user_info) = user_info_opt.as_ref() {
+                    print_detail(user_info);
+                }
+            }
+            // If groups requested, print them
+            if cli.groups {
+                if let Some(gs) = groups_result {
+                    println!("Groups:");
+                    for g in gs {
+                        println!(" - {g}");
+                    }
+                } else {
+                    println!("Groups: (none or failed to enumerate)");
+                }
             }
         }
     }

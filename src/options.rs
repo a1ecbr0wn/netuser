@@ -13,13 +13,17 @@ pub struct CmdLineOptions {
     /// Username to look up
     pub username: String,
 
-    /// Show brief details. Mutually exclusive with --extended-details.
-    #[arg(short = 'd', long = "details", conflicts_with = "extended_details")]
+    /// Show brief details. Mutually exclusive with --extended-details and --reverse.
+    #[arg(short = 'd', long = "details", conflicts_with_all = ["extended_details", "reverse"])]
     pub details: bool,
 
-    /// Show extended details. Mutually exclusive with --details.
-    #[arg(short = 'e', long = "extended-details", conflicts_with = "details")]
+    /// Show extended details. Mutually exclusive with --details and --reverse.
+    #[arg(short = 'e', long = "extended-details", conflicts_with_all = ["details", "reverse"])]
     pub extended_details: bool,
+
+    /// Reverse lookup: search for users by full name or comment. Mutually exclusive with --details and --extended-details.
+    #[arg(short = 'r', long = "reverse", conflicts_with_all = ["details", "extended_details"])]
+    pub reverse: bool,
 
     /// Show groups the user is a member of
     #[arg(short = 'g', long = "groups")]
