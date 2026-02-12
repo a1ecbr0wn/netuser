@@ -342,9 +342,7 @@ fn main() -> Result<()> {
         } else {
             display_users_table(&users);
         }
-
     } else {
-
         // Fetch data according to requested level, with the same fallback behavior (try DC, then local)
         let user_info_opt: Option<UserInfo>;
 
@@ -386,7 +384,7 @@ fn main() -> Result<()> {
                 comment: None,
                 usr_comment: None,
                 password_age: None,
-                	privileges: None,
+                privileges: None,
                 home_dir: None,
                 last_logon: None,
                 last_logoff: None,
