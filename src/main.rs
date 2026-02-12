@@ -448,42 +448,42 @@ fn main() -> Result<()> {
             };
             let j = serde_json::to_string_pretty(&json)?;
             println!("{j}");
+            return Ok(());
         }
-        return Ok(());
-    }
 
-    // Default behavior: if no detail/groups flags, print only the full name (use level 10)
-    if !cli.details && !cli.extended_details && !cli.groups {
-        // No detail flags requested and no groups: show only full name using level10 when available.
-        if let Some(user_info) = user_info_opt.as_ref() {
-            if let Some(full_name) = &user_info.full_name {
-                println!("{full_name}");
-            } else if let Some(name) = &user_info.username {
-                println!("{name}");
-            } else {
-                println!("{}", cli.username.to_owned());
-            }
-        } else {
-            // As a very conservative fallback
-            println!("{}", &cli.username);
-        }
-        return Ok(());
-    } else {
-        // If detailed, print all fields
-        if cli.details || cli.extended_details {
+        // Default behavior: if no detail/groups flags, print only the full name (use level 10)
+        if !cli.details && !cli.extended_details && !cli.groups {
+            // No detail flags requested and no groups: show only full name using level10 when available.
             if let Some(user_info) = user_info_opt.as_ref() {
-                print_detail(user_info);
-            }
-        }
-        // If groups requested, print them
-        if cli.groups {
-            if let Some(gs) = groups_result {
-                println!("Groups:");
-                for g in gs {
-                    println!(" - {g}");
+                if let Some(full_name) = &user_info.full_name {
+                    println!("{full_name}");
+                } else if let Some(name) = &user_info.username {
+                    println!("{name}");
+                } else {
+                    println!("{}", cli.username.to_owned());
                 }
             } else {
-                println!("Groups: (none or failed to enumerate)");
+                // As a very conservative fallback
+                println!("{}", &cli.username);
+            }
+            return Ok(());
+        } else {
+            // If detailed, print all fields
+            if cli.details || cli.extended_details {
+                if let Some(user_info) = user_info_opt.as_ref() {
+                    print_detail(user_info);
+                }
+            }
+            // If groups requested, print them
+            if cli.groups {
+                if let Some(gs) = groups_result {
+                    println!("Groups:");
+                    for g in gs {
+                        println!(" - {g}");
+                    }
+                } else {
+                    println!("Groups: (none or failed to enumerate)");
+                }
             }
         }
     }
