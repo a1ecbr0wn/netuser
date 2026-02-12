@@ -303,41 +303,6 @@ fn display_users_json(users: &[winapi::EnumeratedUser]) -> Result<()> {
 fn main() -> Result<()> {
     let cli = CmdLineOptions::parse();
 
-    // Handle reverse lookup mode
-    if cli.reverse {
-        // Determine server option for reverse lookup
-        let server_opt: Option<String> = if cli.no_discover {
-            normalize_server_input(cli.server.as_deref())
-        } else {
-            if let Some(s) = cli.server.as_deref() {
-                normalize_server_input(Some(s))
-            } else {
-                get_domain_controller_name().and_then(|s| normalize_server_input(Some(&s)))
-            }
-        };
-        let servername = server_opt.as_deref();
-
-        // Enumerate all users matching the search string
-        let users = enumerate_users(servername, &cli.username)
-            .or_else(|e| {
-                if servername.is_some() {
-                    eprintln!("warning: failed to enumerate users on DC ({e}). Falling back to local queries.");
-                    enumerate_users(None, &cli.username)
-                } else {
-                    Err(e)
-                }
-            })
-            .context("failed to enumerate users - ensure you have privileges")?;
-
-        // Display results based on output format
-        if cli.json {
-            display_users_json(&users)?;
-        } else {
-            display_users_table(&users);
-        }
-        return Ok(());
-    }
-
     // Determine server option:
     // - If --no-discover is set: use --server (if provided and non-empty) after normalization; otherwise use local (None).
     // - If --no-discover is not set: if --server provided use it (normalized), otherwise attempt to discover a DC and normalize its name.
@@ -357,98 +322,71 @@ fn main() -> Result<()> {
     // Pass an Option<&str> to existing query functions
     let servername = server_opt.as_deref();
 
-    // Fetch data according to requested level, with the same fallback behavior (try DC, then local)
-    let user_info_opt: Option<UserInfo>;
-
-    if cli.extended_details {
-        match query_user_extended_details(servername, &cli.username) {
-            Ok(u10) => user_info_opt = Some(u10),
-            Err(e) => {
+    // Handle reverse lookup mode
+    if cli.reverse {
+        // Enumerate all users matching the search string
+        let users = enumerate_users(servername, &cli.username)
+            .or_else(|e| {
                 if servername.is_some() {
-                    eprintln!("warning: failed to query user info using DC ({e}). Falling back to local queries.");
-                    user_info_opt = Some(
-                        query_user_extended_details(None, &cli.username).with_context(|| {
-                            "failed to query user info (fallback) - ensure you have privileges"
-                        })?,
-                    );
+                    eprintln!("warning: failed to enumerate users on DC ({e}). Falling back to local queries.");
+                    enumerate_users(None, &cli.username)
                 } else {
-                    return Err(e).context("failed to query user info");
+                    Err(e)
                 }
-            }
-        }
-    } else if cli.details {
-        match query_user_details(servername, &cli.username) {
-            Ok(u10) => user_info_opt = Some(u10),
-            Err(e) => {
-                if servername.is_some() {
-                    eprintln!("warning: failed to query user info using DC ({e}). Falling back to local queries.");
-                    user_info_opt =
-                        Some(query_user_details(None, &cli.username).with_context(|| {
-                            "failed to query user info (fallback) - ensure you have privileges"
-                        })?);
-                } else {
-                    return Err(e).context("failed to query user info");
-                }
-            }
-        }
-    } else {
-        user_info_opt = Some(UserInfo {
-            username: Some(cli.username.to_owned()),
-            full_name: None,
-            comment: None,
-            usr_comment: None,
-            password_age: None,
-            privileges: None,
-            home_dir: None,
-            last_logon: None,
-            last_logoff: None,
-            workstations: None,
-            max_storage: None,
-            num_logons: None,
-            logon_server: None,
-            country_code: None,
-        })
-    };
+            })
+            .context("failed to enumerate users - ensure you have privileges")?;
 
-    // Only query groups when the user explicitly requested --groups.
-    // Previously groups were queried when --json was set; now we restrict to -g/--groups only.
-    let groups_result = if cli.groups {
-        match query_user_groups(servername, &cli.username) {
-            Ok(g) => Some(g),
-            Err(e) => {
-                if servername.is_some() {
-                    eprintln!("warning: failed to query groups using DC ({e}). Falling back to local queries.");
-                    match query_user_groups(None, &cli.username) {
-                        Ok(g2) => Some(g2),
-                        Err(e2) => {
-                            eprintln!("failed to query groups (fallback): {e2}");
-                            None
-                        }
-                    }
-                } else {
-                    eprintln!("failed to query groups: {e}");
-                    None
-                }
-            }
-        }
-    } else {
-        None
-    };
-
-    // Output handling
-    if cli.json {
-        // Build JSON according to the information we have:
-        let json = if let Some(user_info) = user_info_opt.as_ref() {
-            build_user_json(user_info, groups_result.as_ref(), cli.groups)
+        // Display results based on output format
+        if cli.json {
+            display_users_json(&users)?;
         } else {
-            // print the minimal object
-            UserJson {
-                username: Some(cli.username.clone()),
+            display_users_table(&users);
+        }
+
+    } else {
+
+        // Fetch data according to requested level, with the same fallback behavior (try DC, then local)
+        let user_info_opt: Option<UserInfo>;
+
+        if cli.extended_details {
+            match query_user_extended_details(servername, &cli.username) {
+                Ok(user) => user_info_opt = Some(user),
+                Err(e) => {
+                    if servername.is_some() {
+                        eprintln!("warning: failed to query user info using DC ({e}). Falling back to local queries.");
+                        user_info_opt = Some(
+                            query_user_extended_details(None, &cli.username).with_context(|| {
+                                "failed to query user info (fallback) - ensure you have privileges"
+                            })?,
+                        );
+                    } else {
+                        return Err(e).context("failed to query user info");
+                    }
+                }
+            }
+        } else if cli.details {
+            match query_user_details(servername, &cli.username) {
+                Ok(user) => user_info_opt = Some(user),
+                Err(e) => {
+                    if servername.is_some() {
+                        eprintln!("warning: failed to query user info using DC ({e}). Falling back to local queries.");
+                        user_info_opt =
+                            Some(query_user_details(None, &cli.username).with_context(|| {
+                                "failed to query user info (fallback) - ensure you have privileges"
+                            })?);
+                    } else {
+                        return Err(e).context("failed to query user info");
+                    }
+                }
+            }
+        } else {
+            user_info_opt = Some(UserInfo {
+                username: Some(cli.username.to_owned()),
                 full_name: None,
                 comment: None,
-                user_comment: None,
+                usr_comment: None,
                 password_age: None,
-                privileges: None,
+                	privileges: None,
                 home_dir: None,
                 last_logon: None,
                 last_logoff: None,
@@ -457,11 +395,62 @@ fn main() -> Result<()> {
                 num_logons: None,
                 logon_server: None,
                 country_code: None,
-                groups: None,
-            }
+            })
         };
-        let j = serde_json::to_string_pretty(&json)?;
-        println!("{j}");
+
+        // Only query groups when the user explicitly requested --groups.
+        // Previously groups were queried when --json was set; now we restrict to -g/--groups only.
+        let groups_result = if cli.groups {
+            match query_user_groups(servername, &cli.username) {
+                Ok(g) => Some(g),
+                Err(e) => {
+                    if servername.is_some() {
+                        eprintln!("warning: failed to query groups using DC ({e}). Falling back to local queries.");
+                        match query_user_groups(None, &cli.username) {
+                            Ok(g2) => Some(g2),
+                            Err(e2) => {
+                                eprintln!("failed to query groups (fallback): {e2}");
+                                None
+                            }
+                        }
+                    } else {
+                        eprintln!("failed to query groups: {e}");
+                        None
+                    }
+                }
+            }
+        } else {
+            None
+        };
+
+        // Output handling
+        if cli.json {
+            // Build JSON according to the information we have:
+            let json = if let Some(user_info) = user_info_opt.as_ref() {
+                build_user_json(user_info, groups_result.as_ref(), cli.groups)
+            } else {
+                // print the minimal object
+                UserJson {
+                    username: Some(cli.username.clone()),
+                    full_name: None,
+                    comment: None,
+                    user_comment: None,
+                    password_age: None,
+                    privileges: None,
+                    home_dir: None,
+                    last_logon: None,
+                    last_logoff: None,
+                    workstations: None,
+                    max_storage: None,
+                    num_logons: None,
+                    logon_server: None,
+                    country_code: None,
+                    groups: None,
+                }
+            };
+            let j = serde_json::to_string_pretty(&json)?;
+            println!("{j}");
+        }
         return Ok(());
     }
 
