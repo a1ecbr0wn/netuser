@@ -15,6 +15,7 @@ mod winapi;
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use comfy_table::Table;
 use options::CmdLineOptions;
 use serde::Serialize;
 use winapi::{
@@ -269,59 +270,14 @@ fn display_users_table(users: &[winapi::EnumeratedUser]) {
         return;
     }
 
-    // Simple table formatting
-    let username_width = users
-        .iter()
-        .map(|u| u.username.len())
-        .max()
-        .unwrap_or(8)
-        .max(8);
-    let fullname_width = users
-        .iter()
-        .map(|u| u.full_name.len())
-        .max()
-        .unwrap_or(9)
-        .max(9);
-    let comment_width = users
-        .iter()
-        .map(|u| u.comment.len())
-        .max()
-        .unwrap_or(7)
-        .max(7);
+    let mut table = Table::new();
+    table.set_header(vec!["Username", "Full Name", "Comment"]);
 
-    // Print header
-    println!(
-        "{:width1$} | {:width2$} | {:width3$}",
-        "Username",
-        "Full Name",
-        "Comment",
-        width1 = username_width,
-        width2 = fullname_width,
-        width3 = comment_width
-    );
-    println!(
-        "{:-<width1$}-+-{:-<width2$}-+-{:-<width3$}",
-        "",
-        "",
-        "",
-        width1 = username_width,
-        width2 = fullname_width,
-        width3 = comment_width
-    );
-
-    // Print rows
     for user in users {
-        println!(
-            "{:width1$} | {:width2$} | {:width3$}",
-            user.username,
-            user.full_name,
-            user.comment,
-            width1 = username_width,
-            width2 = fullname_width,
-            width3 = comment_width
-        );
+        table.add_row(vec![&user.username, &user.full_name, &user.comment]);
     }
 
+    println!("{table}");
     println!("\nTotal: {} user(s) found", users.len());
 }
 
