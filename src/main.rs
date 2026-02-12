@@ -1,12 +1,11 @@
 //! netuser - A better `net user <name> /domain` for looking up users on my windows domain
 //!
 //! Features:
-//! - CLI via `clap`
-//! - Uses `windows` crate to call `NetGetDCName`, `NetUserGetInfo`, `NetUserGetGroups`
 //! - Default output is the user's full name (or username if missing)
 //! - `-d/--detail` prints basic user info fields
 //! - `-e/--extended-details` prints all user info fields
 //! - `-g/--groups` prints group membership
+//! - `-r/--reverse` performs a reverse lookup to find users by full name, username, or comment
 //! - `-j/--json` outputs requested details in JSON (respects other flags)
 
 #![allow(non_snake_case)]
@@ -19,8 +18,8 @@ use clap::Parser;
 use options::CmdLineOptions;
 use serde::Serialize;
 use winapi::{
-    decode_privileges, get_domain_controller_name, get_user_details, get_user_extended_details,
-    get_user_groups, pwstr_to_string,
+    decode_privileges, enumerate_users, get_domain_controller_name, get_user_details,
+    get_user_extended_details, get_user_groups, pwstr_to_string,
 };
 
 /// Lightweight representation of user info results.
@@ -89,6 +88,19 @@ struct UserJson {
     // Only populated when --groups is provided
     #[serde(skip_serializing_if = "Option::is_none")]
     groups: Option<Vec<String>>,
+}
+
+#[derive(Serialize)]
+struct ReverseSearchResult {
+    username: String,
+    full_name: String,
+    comment: String,
+}
+
+#[derive(Serialize)]
+struct ReverseSearchResults {
+    results: Vec<ReverseSearchResult>,
+    total: usize,
 }
 
 // Functions to interpret the data received about users
@@ -250,8 +262,125 @@ fn seconds_to_days(seconds: u32) -> u32 {
     (seconds) / 86_400
 }
 
+/// Display enumerated users in a formatted table.
+fn display_users_table(users: &[winapi::EnumeratedUser]) {
+    if users.is_empty() {
+        println!("No users found matching the search criteria.");
+        return;
+    }
+
+    // Simple table formatting
+    let username_width = users
+        .iter()
+        .map(|u| u.username.len())
+        .max()
+        .unwrap_or(8)
+        .max(8);
+    let fullname_width = users
+        .iter()
+        .map(|u| u.full_name.len())
+        .max()
+        .unwrap_or(9)
+        .max(9);
+    let comment_width = users
+        .iter()
+        .map(|u| u.comment.len())
+        .max()
+        .unwrap_or(7)
+        .max(7);
+
+    // Print header
+    println!(
+        "{:width1$} | {:width2$} | {:width3$}",
+        "Username",
+        "Full Name",
+        "Comment",
+        width1 = username_width,
+        width2 = fullname_width,
+        width3 = comment_width
+    );
+    println!(
+        "{:-<width1$}-+-{:-<width2$}-+-{:-<width3$}",
+        "",
+        "",
+        "",
+        width1 = username_width,
+        width2 = fullname_width,
+        width3 = comment_width
+    );
+
+    // Print rows
+    for user in users {
+        println!(
+            "{:width1$} | {:width2$} | {:width3$}",
+            user.username,
+            user.full_name,
+            user.comment,
+            width1 = username_width,
+            width2 = fullname_width,
+            width3 = comment_width
+        );
+    }
+
+    println!("\nTotal: {} user(s) found", users.len());
+}
+
+/// Display enumerated users as JSON.
+fn display_users_json(users: &[winapi::EnumeratedUser]) -> Result<()> {
+    let results = ReverseSearchResults {
+        results: users
+            .iter()
+            .map(|u| ReverseSearchResult {
+                username: u.username.clone(),
+                full_name: u.full_name.clone(),
+                comment: u.comment.clone(),
+            })
+            .collect(),
+        total: users.len(),
+    };
+
+    let json = serde_json::to_string_pretty(&results)?;
+    println!("{json}");
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let cli = CmdLineOptions::parse();
+
+    // Handle reverse lookup mode
+    if cli.reverse {
+        // Determine server option for reverse lookup
+        let server_opt: Option<String> = if cli.no_discover {
+            normalize_server_input(cli.server.as_deref())
+        } else {
+            if let Some(s) = cli.server.as_deref() {
+                normalize_server_input(Some(s))
+            } else {
+                get_domain_controller_name().and_then(|s| normalize_server_input(Some(&s)))
+            }
+        };
+        let servername = server_opt.as_deref();
+
+        // Enumerate all users matching the search string
+        let users = enumerate_users(servername, &cli.username)
+            .or_else(|e| {
+                if servername.is_some() {
+                    eprintln!("warning: failed to enumerate users on DC ({e}). Falling back to local queries.");
+                    enumerate_users(None, &cli.username)
+                } else {
+                    Err(e)
+                }
+            })
+            .context("failed to enumerate users - ensure you have privileges")?;
+
+        // Display results based on output format
+        if cli.json {
+            display_users_json(&users)?;
+        } else {
+            display_users_table(&users);
+        }
+        return Ok(());
+    }
 
     // Determine server option:
     // - If --no-discover is set: use --server (if provided and non-empty) after normalization; otherwise use local (None).

@@ -6,8 +6,8 @@ use widestring::{U16CStr, U16CString};
 use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::Foundation::ERROR_SUCCESS;
 use windows::Win32::NetworkManagement::NetManagement::{
-    NetApiBufferFree, NetGetDCName, NetUserGetGroups, NetUserGetInfo, GROUP_USERS_INFO_0,
-    USER_INFO_10, USER_INFO_11,
+    NetApiBufferFree, NetGetDCName, NetUserEnum, NetUserGetGroups, NetUserGetInfo,
+    FILTER_NORMAL_ACCOUNT, GROUP_USERS_INFO_0, USER_INFO_10, USER_INFO_11,
 };
 
 /// Convert a PWSTR from the Windows API to a String.
@@ -153,6 +153,80 @@ pub fn get_user_groups(servername: Option<&str>, username: &str) -> Result<Vec<S
         }
         free_api_buffer(buf);
         Ok(groups)
+    }
+}
+
+/// A user record from enumeration with displayable information.
+#[derive(Clone, Debug)]
+pub struct EnumeratedUser {
+    pub username: String,
+    pub full_name: String,
+    pub comment: String,
+}
+
+impl EnumeratedUser {
+    /// Check if this user matches the search string (case-insensitive substring match).
+    pub fn matches(&self, search: &str) -> bool {
+        let search_lower = search.to_lowercase();
+        self.username.to_lowercase().contains(&search_lower)
+            || self.full_name.to_lowercase().contains(&search_lower)
+            || self.comment.to_lowercase().contains(&search_lower)
+    }
+}
+
+/// Enumerate all users on the server and return those matching the search string.
+pub fn enumerate_users(servername: Option<&str>, filter: &str) -> Result<Vec<EnumeratedUser>> {
+    unsafe {
+        let mut buf: *mut core::ffi::c_void = null_mut();
+        let mut entries_read: u32 = 0;
+        let mut total_entries: u32 = 0;
+        let mut resume_handle: u32 = 0;
+
+        let server_pw = servername.map(|s| U16CString::from_str(s).unwrap());
+        let server_p: PCWSTR = server_pw
+            .as_ref()
+            .map(|u| PCWSTR(u.as_ptr()))
+            .unwrap_or(PCWSTR::null());
+
+        let status = NetUserEnum(
+            server_p,
+            10, // USER_INFO_10 level
+            FILTER_NORMAL_ACCOUNT,
+            &mut buf as *mut *mut core::ffi::c_void as _,
+            u32::MAX,
+            &mut entries_read,
+            &mut total_entries,
+            Some(&mut resume_handle),
+        );
+
+        if status != ERROR_SUCCESS.0 {
+            anyhow::bail!("NetUserEnum failed with code {status}");
+        }
+
+        let mut users = Vec::new();
+        if !buf.is_null() && entries_read > 0 {
+            let arr_ptr = buf as *const USER_INFO_10;
+            for i in 0..entries_read {
+                let item = arr_ptr.add(i as usize).read();
+                let username = pwstr_to_string(item.usri10_name).unwrap_or_default();
+                let full_name = pwstr_to_string(item.usri10_full_name).unwrap_or_default();
+                let comment = pwstr_to_string(item.usri10_comment).unwrap_or_default();
+
+                let user = EnumeratedUser {
+                    username,
+                    full_name,
+                    comment,
+                };
+
+                // Filter by search string
+                if user.matches(filter) {
+                    users.push(user);
+                }
+            }
+        }
+        free_api_buffer(buf);
+
+        Ok(users)
     }
 }
 
