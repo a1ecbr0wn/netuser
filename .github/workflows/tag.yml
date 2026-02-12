@@ -54,11 +54,7 @@ jobs:
 
       - name: Replace the version number in the Cargo.toml files
         run: |
-          sed -i 's/^version = .*/${{ env.cargo_version }}/g' cli/Cargo.toml
-          sed -i 's/^version = .*/${{ env.cargo_version }}/g' daemon/Cargo.toml
-          sed -i 's/^version = .*/${{ env.cargo_version }}/g' monitor/Cargo.toml
-          sed -i 's/^version = .*/${{ env.cargo_version }}/g' scanner/Cargo.toml
-          sed -i 's/^version = .*/${{ env.cargo_version }}/g' grpc/Cargo.toml
+          sed -i 's/^version = .*/${{ env.cargo_version }}/g' Cargo.toml
 
       - name: Add, push, tag, push
         run: |
