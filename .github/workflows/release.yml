@@ -44,7 +44,7 @@ jobs:
         run: $(Get-FileHash netuser.zip -Algorithm MD5).Hash | Out-File  -Encoding ASCII netuser.md5
 
       - name: Upload the artifact with the workflow run
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: netuser-${{ github.ref_name }}
           path: netuser.*
@@ -63,7 +63,7 @@ jobs:
           fetch-depth: 0
 
       - name: Download all release artifacts from the workflow
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
 
       - name: Generate a changelog
         uses: orhun/git-cliff-action@v4
@@ -83,4 +83,4 @@ jobs:
           token: "${{ secrets.GITHUB_TOKEN }}"
           files: |
             LICENSE
-            **/netuser-*.*
+            **/netuser.*
