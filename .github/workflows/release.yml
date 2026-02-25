@@ -38,10 +38,10 @@ jobs:
         run: cargo build --release
 
       - name: Package Release
-        run: zip netuser.zip target/release/*
+        run: Compress-Archive -Path target/release/* -DestinationPath netuser.zip
 
       - name: Generate MD5 checksum
-        run: certutil -hashfile netuser.zip MD5 > netuser.md5
+        run: $(Get-FileHash netuser.zip -Algorithm MD5).Hash | Out-File  -Encoding ASCII netuser.md5
 
       - name: Upload the artifact with the workflow run
         uses: actions/upload-artifact@v4
