@@ -8,7 +8,7 @@ use clap::Parser;
 /// Simple CLI for querying Windows user information.
 #[derive(Parser)]
 #[command(name = "netuser")]
-#[command(author, version, about = "Query Windows user information", long_about = None)]
+#[command(author, about = "Query Windows user information", long_about = None, arg_required_else_help(true), disable_version_flag(true))]
 pub struct CmdLineOptions {
     /// Username to look up
     pub username: String,
