@@ -78,7 +78,7 @@ jobs:
         run: cargo build --profile=minsize
 
       - name: Package Release
-        run: Compress-Archive -Path target/release/* -DestinationPath netuser.zip
+        run: Compress-Archive -Path target/debug/* -DestinationPath netuser.zip
 
       - name: Upload the artifact with the workflow run
         uses: actions/upload-artifact@v6
