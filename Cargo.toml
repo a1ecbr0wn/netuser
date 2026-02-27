@@ -4,7 +4,10 @@ version = "0.2.2"
 edition = "2021"
 authors = ["Alec Brown<alec@noser.net>"]
 description = "A small CLI tool to query Windows user information."
+repository = "https://github.com/a1ecbr0wn/netuser"
 license = "Apache-2.0"
+keywords = ["windows", "utility"]
+categories = ["windows-utility", "active-directory"]
 
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
