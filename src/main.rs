@@ -16,6 +16,7 @@ mod winapi;
 use anyhow::{Context, Result};
 use clap::Parser;
 use comfy_table::Table;
+use lazy_static::lazy_static;
 use options::CmdLineOptions;
 use serde::Serialize;
 use winapi::{
