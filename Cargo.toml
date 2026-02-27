@@ -1,6 +1,6 @@
 [package]
 name = "netuser"
-version = "0.2.3"
+version = "0.2.4"
 edition = "2021"
 authors = ["Alec Brown<alec@noser.net>"]
 description = "A small CLI tool to query Windows user information."
