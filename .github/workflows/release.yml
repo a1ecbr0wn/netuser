@@ -50,6 +50,22 @@ jobs:
           path: netuser.*
           retention-days: 1
 
+  # Publishing to crates.io - this will be skipped if the tag as a '-' in it for testing purposes
+  release-tag-publish:
+    name: Publish tag as a release
+    runs-on: windows-latest
+    needs: release-tag-build-windows
+    if: github.ref_type == 'tag' && ( contains(github.ref_name, '-') == false )
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Publish Application to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: "${{ secrets.CRATES_TOKEN }}"
+        run: cargo publish
+
   # Package the artifacts as a release package
   release-tag-package:
     name: Package tag as a release
