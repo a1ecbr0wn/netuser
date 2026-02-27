@@ -35,7 +35,7 @@ jobs:
         run: cargo test
 
       - name: Build
-        run: cargo build --release
+        run: cargo build --profile=minsize --release
 
       - name: Package Release
         run: Compress-Archive -Path target/release/* -DestinationPath netuser.zip

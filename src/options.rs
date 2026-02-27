@@ -46,4 +46,8 @@ pub struct CmdLineOptions {
     /// Output requested details as JSON
     #[arg(short = 'j', long = "json")]
     pub json: bool,
+
+    /// Print version information
+    #[arg(short = 'V', long, value_parser)]
+    pub version: bool,
 }

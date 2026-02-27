@@ -301,6 +301,10 @@ fn display_users_json(users: &[winapi::EnumeratedUser]) -> Result<()> {
 }
 
 fn main() -> Result<()> {
+    lazy_static! {
+        static ref VERSION: String = format!(env!("CARGO_PKG_VERSION"));
+    };
+
     let cli = CmdLineOptions::parse();
 
     // Determine server option:
@@ -486,6 +490,11 @@ fn main() -> Result<()> {
                 }
             }
         }
+    }
+
+    if cli.version {
+        println!("netuser v{}", VERSION.as_str());
+        return Ok(());
     }
 
     Ok(())
