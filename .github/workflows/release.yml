@@ -35,10 +35,10 @@ jobs:
         run: cargo test
 
       - name: Build
-        run: cargo build --profile=minsize --release
+        run: cargo build --profile=minsize
 
       - name: Package Release
-        run: Compress-Archive -Path target/release/netuser.exe -DestinationPath netuser.zip
+        run: Compress-Archive -Path target/minsize/netuser.exe -DestinationPath netuser.zip
 
       - name: Generate MD5 checksum
         run: $(Get-FileHash netuser.zip -Algorithm MD5).Hash | Out-File  -Encoding ASCII netuser.md5

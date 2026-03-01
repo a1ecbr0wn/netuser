@@ -75,10 +75,10 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Build
-        run: cargo build --profile=minsize --release
+        run: cargo build --profile=minsize
 
       - name: Package Release
-        run: Compress-Archive -Path target/release/netuser.exe -DestinationPath netuser.zip
+        run: Compress-Archive -Path target/minsize/netuser.exe -DestinationPath netuser.zip
 
       - name: Upload the artifact with the workflow run
         uses: actions/upload-artifact@v6
