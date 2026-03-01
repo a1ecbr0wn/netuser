@@ -75,17 +75,7 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Build
-        run: cargo build --profile=minsize
-
-      - name: Package Release
-        run: Compress-Archive -Path target/minsize/netuser.exe -DestinationPath netuser.zip
-
-      - name: Upload the artifact with the workflow run
-        uses: actions/upload-artifact@v6
-        with:
-          name: netuser-${{ github.ref_name }}
-          path: netuser.*
-          retention-days: 1
+        run: cargo build
 
       - name: Test
         run: cargo test
